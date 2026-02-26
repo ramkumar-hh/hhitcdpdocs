@@ -23,6 +23,12 @@
 11. [Azure Deployment & Infrastructure](#11-azure-deployment--infrastructure)
 12. [API Design & Versioning](#12-api-design--versioning)
 13. [Appendix: Entity Relationship Diagrams](#13-appendix-entity-relationship-diagrams)
+14. [Middleware Implementation (Full Stack)](#14-middleware-implementation-full-stack)
+15. [WebSocket Architecture (Notifications & Chat)](#15-websocket-architecture-notifications--chat)
+16. [AI Chat Agent — LangChain & LangGraph](#16-ai-chat-agent--langchain--langgraph)
+17. [Power BI Integration & Backend-Controlled Menu System](#17-power-bi-integration--backend-controlled-menu-system)
+18. [Complete API Reference — End-to-End](#18-complete-api-reference--end-to-end)
+19. [Frontend Integration Guide](#19-frontend-integration-guide)
 
 ---
 
@@ -2305,6 +2311,2788 @@ Query Parameters:
 
 ---
 
+## 14. Middleware Implementation (Full Stack)
+
+Every HTTP request to the Vesper API passes through an ordered middleware pipeline. The sections below describe what each middleware layer does, how to implement it, and where auth/authorization checks plug in.
+
+### 14.1 Middleware Execution Order
+
+```
+Incoming HTTP Request
+        │
+        ▼
+[MW-1]  CorrelationIdMiddleware    → Assign X-Correlation-ID for distributed tracing
+        │
+        ▼
+[MW-2]  CORSMiddleware             → Dynamic per-tenant allowed origins
+        │
+        ▼
+[MW-3]  RateLimiterMiddleware      → Redis sliding-window; 429 if exceeded
+        │
+        ▼
+[MW-4]  TenantContextMiddleware    → Resolve tenant from domain/header; inject tenant_id
+        │                            into request.state AND DB session context (RLS)
+        ▼
+[MW-5]  JWTAuthMiddleware          → Validate Bearer token (signature, expiry, audience)
+        │                            Extract claims → request.state.user
+        ▼
+[MW-6]  SessionValidationMiddleware→ Confirm session not revoked (Redis lookup)
+        │
+        ▼
+[MW-7]  PermissionMiddleware       → RBAC check via PermissionEngine (Redis-cached)
+        │                            Decorators (@require_permission) on each endpoint
+        ▼
+[MW-8]  AuditMiddleware            → Async publish audit event after response
+        │
+        ▼
+[MW-9]  ErrorHandlerMiddleware     → Catch all exceptions → structured JSON error
+        │
+        ▼
+    Route Handler (FastAPI endpoint)
+```
+
+> **Skip Rules**: MW-4 through MW-7 are bypassed for public endpoints (`/api/v1/auth/login`, `/api/v1/tenants/resolve`, `/api/v1/health`, WebSocket handshake URL before token validation step).
+
+---
+
+### 14.2 MW-1: Correlation ID Middleware
+
+**Purpose**: Attach a unique request ID to every request for distributed tracing across microservices and log correlation in Application Insights.
+
+```python
+# app/middleware/correlation_id.py
+import uuid
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+
+class CorrelationIdMiddleware(BaseHTTPMiddleware):
+    HEADER = "X-Correlation-ID"
+
+    async def dispatch(self, request: Request, call_next):
+        correlation_id = request.headers.get(self.HEADER) or str(uuid.uuid4())
+        request.state.correlation_id = correlation_id
+
+        response = await call_next(request)
+        response.headers[self.HEADER] = correlation_id
+        return response
+```
+
+**Registration** (`app/main.py`):
+```python
+app.add_middleware(CorrelationIdMiddleware)
+```
+
+---
+
+### 14.3 MW-2: CORS Middleware (Per-Tenant Dynamic)
+
+**Purpose**: Allow browser requests only from origins registered for a tenant. Prevents cross-tenant data leakage via browser-side attacks.
+
+```python
+# app/middleware/cors.py
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from app.services.tenant_service import TenantService
+
+CORS_HEADERS = {
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+    "Access-Control-Allow-Headers": (
+        "Authorization,Content-Type,X-Tenant-ID,X-Correlation-ID"
+    ),
+    "Access-Control-Max-Age": "600",
+}
+
+class TenantCORSMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        origin = request.headers.get("origin", "")
+
+        # Preflight
+        if request.method == "OPTIONS" and origin:
+            tenant = await TenantService.resolve_by_origin(origin)
+            if tenant and origin in tenant.allowed_origins:
+                from starlette.responses import Response
+                resp = Response(status_code=204)
+                resp.headers["Access-Control-Allow-Origin"] = origin
+                for k, v in CORS_HEADERS.items():
+                    resp.headers[k] = v
+                return resp
+
+        response = await call_next(request)
+
+        if origin:
+            tenant = getattr(request.state, "tenant", None)
+            if tenant and origin in tenant.allowed_origins:
+                response.headers["Access-Control-Allow-Origin"] = origin
+                for k, v in CORS_HEADERS.items():
+                    response.headers[k] = v
+
+        return response
+```
+
+**Tenant allowed origins** are stored in `tenant_configurations` with `config_key = 'cors.allowed_origins'` as a JSON array:
+```json
+["https://analytics.acme-corp.com", "https://acme.vesper-analytics.com"]
+```
+
+---
+
+### 14.4 MW-3: Rate Limiter Middleware
+
+**Purpose**: Prevent brute force, abuse, and overload. Uses Redis sorted sets for a sliding window algorithm.
+
+```python
+# app/middleware/rate_limiter.py
+import time
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from app.services.cache_service import CacheService
+
+RATE_LIMITS = {
+    "auth.login":       {"requests": 5,   "window": 60},
+    "auth.refresh":     {"requests": 10,  "window": 60},
+    "ws.connect":       {"requests": 20,  "window": 60},
+    "ai.chat":          {"requests": 30,  "window": 60},
+    "export":           {"requests": 5,   "window": 300},
+    "bulk_operations":  {"requests": 2,   "window": 60},
+    "default":          {"requests": 100, "window": 60},
+    "super_admin":      {"requests": 500, "window": 60},
+}
+
+def _classify_endpoint(path: str) -> str:
+    if "/auth/login" in path:    return "auth.login"
+    if "/auth/refresh" in path:  return "auth.refresh"
+    if "/ws/" in path:           return "ws.connect"
+    if "/chat" in path:          return "ai.chat"
+    if "/export" in path:        return "export"
+    if "/bulk" in path:          return "bulk_operations"
+    return "default"
+
+class RateLimiterMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, cache: CacheService):
+        super().__init__(app)
+        self.cache = cache
+
+    async def dispatch(self, request: Request, call_next):
+        # Identify caller — use IP before auth, user_id after
+        user = getattr(request.state, "user", None)
+        tenant = getattr(request.state, "tenant", None)
+        identifier = (
+            f"{tenant.id}:{user.id}" if (tenant and user)
+            else request.client.host
+        )
+
+        endpoint_class = _classify_endpoint(request.url.path)
+        # Super admins get elevated limits
+        if user and user.user_type == "super_admin":
+            endpoint_class = "super_admin"
+
+        limit_cfg = RATE_LIMITS[endpoint_class]
+        now = time.time()
+        window_start = now - limit_cfg["window"]
+        redis_key = f"rate:{identifier}:{endpoint_class}"
+
+        # Sliding window: remove old entries, add current, count
+        pipe = self.cache.pipeline()
+        pipe.zremrangebyscore(redis_key, 0, window_start)
+        pipe.zadd(redis_key, {str(now): now})
+        pipe.zcard(redis_key)
+        pipe.expire(redis_key, limit_cfg["window"])
+        results = await pipe.execute()
+        request_count = results[2]
+
+        if request_count > limit_cfg["requests"]:
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "status": "error",
+                    "errors": [{"code": "RATE_LIMITED",
+                                "message": "Too many requests. Please slow down."}]
+                },
+                headers={"Retry-After": str(limit_cfg["window"])},
+            )
+
+        response = await call_next(request)
+        response.headers["X-RateLimit-Limit"] = str(limit_cfg["requests"])
+        response.headers["X-RateLimit-Remaining"] = str(
+            max(0, limit_cfg["requests"] - request_count)
+        )
+        return response
+```
+
+---
+
+### 14.5 MW-4: Tenant Context Middleware
+
+**Purpose**: Resolve which tenant this request belongs to. Injects tenant context into every DB session (required for SQL Row-Level Security).
+
+```python
+# app/middleware/tenant_context.py
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from app.services.tenant_service import TenantService
+
+PUBLIC_PATHS = {
+    "/api/v1/tenants/resolve",
+    "/api/v1/auth/login",
+    "/api/v1/auth/entra/authorize",
+    "/api/v1/auth/entra/callback",
+    "/api/v1/health",
+    "/api/docs",
+    "/api/openapi.json",
+}
+
+class TenantContextMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Skip for public paths
+        if request.url.path in PUBLIC_PATHS:
+            return await call_next(request)
+
+        # Resolution priority:
+        # 1. X-Tenant-ID header (internal service-to-service)
+        # 2. Origin / Referer domain (browser requests)
+        # 3. JWT claim 'tid' (extracted later in JWT middleware, but
+        #    we do a best-effort resolution here for public endpoints)
+
+        tenant_id = request.headers.get("X-Tenant-ID")
+        tenant = None
+
+        if tenant_id:
+            tenant = await TenantService.get_by_id(tenant_id)
+        else:
+            origin = request.headers.get("origin") or request.headers.get("referer", "")
+            if origin:
+                domain = origin.split("//")[-1].split("/")[0].split(":")[0]
+                tenant = await TenantService.resolve_by_domain(domain)
+
+        if not tenant or tenant.status != "active":
+            return JSONResponse(
+                status_code=400,
+                content={"status": "error",
+                         "errors": [{"code": "TENANT_NOT_FOUND",
+                                     "message": "Unable to resolve tenant context."}]},
+            )
+
+        request.state.tenant = tenant
+
+        # Inject tenant_id into DB session context for SQL RLS
+        # Done inside get_db() dependency by reading request.state.tenant
+        return await call_next(request)
+```
+
+**DB Session with RLS Context** (`app/db/session.py`):
+```python
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy import text
+
+async def get_db(request: Request) -> AsyncSession:
+    async with AsyncSessionLocal() as session:
+        tenant = getattr(request.state, "tenant", None)
+        user = getattr(request.state, "user", None)
+
+        if tenant:
+            # Set SQL Server session context for RLS policies
+            await session.execute(
+                text("EXEC sp_set_session_context @key=N'tenant_id', "
+                     "@value=:tid, @read_only=1"),
+                {"tid": str(tenant.id)}
+            )
+        if user and user.user_type == "super_admin":
+            await session.execute(
+                text("EXEC sp_set_session_context @key=N'is_super_admin', "
+                     "@value=1, @read_only=1")
+            )
+        yield session
+```
+
+---
+
+### 14.6 MW-5: JWT Authentication Middleware
+
+**Purpose**: Validate the Bearer token on every protected request. Populates `request.state.user` with the decoded claims. No DB hit — purely cryptographic verification.
+
+```python
+# app/middleware/jwt_auth.py
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from app.core.security import JWTService
+
+PUBLIC_PATHS = {
+    "/api/v1/tenants/resolve",
+    "/api/v1/auth/login",
+    "/api/v1/auth/entra/authorize",
+    "/api/v1/auth/entra/callback",
+    "/api/v1/health",
+}
+
+class JWTAuthMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, jwt_service: JWTService):
+        super().__init__(app)
+        self.jwt = jwt_service
+
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path in PUBLIC_PATHS:
+            return await call_next(request)
+
+        # WebSocket upgrade: token passed as query param ?token=...
+        if request.headers.get("upgrade") == "websocket":
+            token = request.query_params.get("token")
+        else:
+            auth_header = request.headers.get("Authorization", "")
+            if not auth_header.startswith("Bearer "):
+                return JSONResponse(
+                    status_code=401,
+                    content={"status": "error",
+                             "errors": [{"code": "MISSING_TOKEN",
+                                         "message": "Authorization header required."}]}
+                )
+            token = auth_header[7:]
+
+        try:
+            claims = self.jwt.decode_access_token(token)
+        except TokenExpiredError:
+            return JSONResponse(
+                status_code=401,
+                content={"status": "error",
+                         "errors": [{"code": "TOKEN_EXPIRED",
+                                     "message": "Access token has expired."}]}
+            )
+        except InvalidTokenError as e:
+            return JSONResponse(
+                status_code=401,
+                content={"status": "error",
+                         "errors": [{"code": "INVALID_TOKEN",
+                                     "message": str(e)}]}
+            )
+
+        # Cross-verify tenant: token tid must match resolved tenant
+        tenant = getattr(request.state, "tenant", None)
+        if tenant and claims["tid"] != str(tenant.id):
+            return JSONResponse(
+                status_code=403,
+                content={"status": "error",
+                         "errors": [{"code": "TENANT_MISMATCH",
+                                     "message": "Token tenant does not match request tenant."}]}
+            )
+
+        request.state.user = UserContext(**claims)
+        return await call_next(request)
+```
+
+**JWT Service** (`app/core/security.py`):
+```python
+# app/core/security.py
+import jwt
+from datetime import datetime, timedelta, timezone
+from cryptography.hazmat.primitives import serialization
+
+class JWTService:
+    ALGORITHM = "RS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES = 15
+    REFRESH_TOKEN_EXPIRE_DAYS = 7
+
+    def __init__(self, private_key: str, public_key: str):
+        self._private_key = serialization.load_pem_private_key(
+            private_key.encode(), password=None
+        )
+        self._public_key = serialization.load_pem_public_key(public_key.encode())
+
+    def create_access_token(self, user: User, tenant: Tenant) -> str:
+        now = datetime.now(timezone.utc)
+        payload = {
+            "sub":           str(user.id),
+            "tid":           str(tenant.id),
+            "email":         user.email,
+            "name":          user.display_name,
+            "type":          user.user_type,
+            "roles":         [r.name for r in user.roles],
+            "groups":        [g.name for g in user.groups],
+            "auth_provider": user.auth_provider,
+            "iat":           int(now.timestamp()),
+            "exp":           int((now + timedelta(
+                                 minutes=self.ACCESS_TOKEN_EXPIRE_MINUTES
+                             )).timestamp()),
+            "jti":           str(uuid.uuid4()),
+            "iss":           "vesper-platform",
+            "aud":           "vesper-api",
+        }
+        return jwt.encode(payload, self._private_key, algorithm=self.ALGORITHM)
+
+    def decode_access_token(self, token: str) -> dict:
+        return jwt.decode(
+            token,
+            self._public_key,
+            algorithms=[self.ALGORITHM],
+            audience="vesper-api",
+            issuer="vesper-platform",
+        )
+
+    # JWKS endpoint — for Entra and external consumers to verify public key
+    def get_jwks(self) -> dict:
+        from jwt.algorithms import RSAAlgorithm
+        return {"keys": [json.loads(RSAAlgorithm.to_jwk(self._public_key))]}
+```
+
+**Public key rotation**: Keys are stored in Azure Key Vault. Rotation is handled by publishing new `kid` (Key ID) to the JWKS endpoint at `GET /api/v1/auth/.well-known/jwks.json`. Old keys remain valid for their token lifetime (15 min) after rotation.
+
+---
+
+### 14.7 MW-6: Session Validation Middleware
+
+**Purpose**: Ensure the session associated with the JWT has not been explicitly revoked (logout, admin action, security event). Redis lookup — O(1).
+
+```python
+# app/middleware/session_validation.py
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from app.services.cache_service import CacheService
+
+class SessionValidationMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, cache: CacheService):
+        super().__init__(app)
+        self.cache = cache
+
+    async def dispatch(self, request: Request, call_next):
+        user = getattr(request.state, "user", None)
+        if not user:
+            return await call_next(request)
+
+        # Check revocation list
+        revoked_key = f"revoked_token:{user.jti}"
+        if await self.cache.exists(revoked_key):
+            return JSONResponse(
+                status_code=401,
+                content={"status": "error",
+                         "errors": [{"code": "SESSION_REVOKED",
+                                     "message": "Session has been revoked. Please log in again."}]}
+            )
+
+        # Verify session record exists in Redis (created at login)
+        session_key = f"session:{user.sub}"
+        session = await self.cache.get(session_key)
+        if not session:
+            return JSONResponse(
+                status_code=401,
+                content={"status": "error",
+                         "errors": [{"code": "SESSION_NOT_FOUND",
+                                     "message": "No active session found."}]}
+            )
+
+        return await call_next(request)
+
+# On logout — revoke the current JTI so it cannot be reused within its TTL
+async def revoke_token(jti: str, exp: int, cache: CacheService):
+    ttl = max(0, exp - int(time.time()))
+    await cache.set(f"revoked_token:{jti}", "1", ttl=ttl)
+```
+
+---
+
+### 14.8 MW-7: Permission Middleware & Endpoint Decorators
+
+**Purpose**: RBAC enforcement. Two complementary mechanisms work together:
+
+1. **Middleware** loads the permission engine into `request.state`
+2. **Endpoint decorator** `@require_permission(resource, action)` performs the actual check
+
+```python
+# app/middleware/permission.py
+from starlette.middleware.base import BaseHTTPMiddleware
+from app.core.permissions import PermissionEngine
+from app.services.cache_service import CacheService
+
+class PermissionMiddleware(BaseHTTPMiddleware):
+    """
+    Attaches a PermissionEngine instance to every request.
+    The actual check is done by @require_permission decorators on endpoints.
+    This avoids running the check for endpoints that don't need it.
+    """
+    def __init__(self, app, cache: CacheService, db_factory):
+        super().__init__(app)
+        self.cache = cache
+        self.db_factory = db_factory
+
+    async def dispatch(self, request: Request, call_next):
+        async with self.db_factory() as db:
+            request.state.permission_engine = PermissionEngine(db, self.cache)
+            return await call_next(request)
+```
+
+```python
+# app/api/deps.py
+from functools import wraps
+from fastapi import HTTPException, status
+
+def require_permission(resource: str, action: str):
+    """
+    FastAPI endpoint decorator for RBAC enforcement.
+    Usage:
+        @router.get("/reports")
+        @require_permission("reports", "view")
+        async def list_reports(request: Request): ...
+    """
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            request: Request = kwargs.get("request") or next(
+                (a for a in args if isinstance(a, Request)), None
+            )
+            user = request.state.user
+            engine: PermissionEngine = request.state.permission_engine
+
+            result = await engine.check_permission(
+                user_id=str(user.sub),
+                tenant_id=str(user.tid),
+                resource_key=resource,
+                action_key=action,
+            )
+
+            if not result.allowed:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={
+                        "code": "PERMISSION_DENIED",
+                        "message": f"You do not have '{action}' permission on '{resource}'.",
+                        "resource": resource,
+                        "action": action,
+                    }
+                )
+            return await func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+def require_role(*roles: str):
+    """Simpler role-based guard for admin endpoints."""
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            request: Request = kwargs.get("request") or next(
+                (a for a in args if isinstance(a, Request)), None
+            )
+            user = request.state.user
+            if not any(r in user.roles for r in roles):
+                raise HTTPException(status_code=403, detail={
+                    "code": "ROLE_REQUIRED",
+                    "message": f"Requires one of roles: {roles}",
+                })
+            return await func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+# Example endpoint combining both
+@router.delete("/users/{user_id}")
+@require_permission("admin.users", "delete")
+async def delete_user(user_id: str, request: Request, db=Depends(get_db)):
+    """Requires both 'admin.users:delete' permission AND tenant_admin role."""
+    ...
+
+@router.post("/tenants")
+@require_role("super_admin")
+async def create_tenant(request: Request, ...):
+    """Super admin only endpoint."""
+    ...
+```
+
+**Authorization Check Flow in Detail**:
+```
+@require_permission("reports.powerbi", "view")
+    │
+    ├─ Cache lookup: perm:tenant_id:user_id:reports.powerbi:view  (TTL 5 min)
+    │    ├─ HIT  → return cached result (sub-millisecond)
+    │    └─ MISS → DB query:
+    │         ├─ Collect all role_ids for user (direct + group-inherited)
+    │         ├─ Find permission_id for (resource=reports.powerbi, action=view)
+    │         ├─ Check role_permission_map for ALLOW or DENY grants
+    │         ├─ Apply precedence: DENY > ALLOW > default-deny
+    │         └─ If still denied, check parent resource (reports → view)
+    │
+    └─ Result stored in Redis
+```
+
+---
+
+### 14.9 MW-8: Audit Logger Middleware
+
+**Purpose**: Asynchronously record all state-changing operations without blocking the response.
+
+```python
+# app/middleware/audit.py
+from starlette.middleware.base import BaseHTTPMiddleware
+import asyncio
+
+AUDITABLE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+class AuditMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, broker):
+        super().__init__(app)
+        self.broker = broker  # Azure Service Bus / RabbitMQ publisher
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+
+        if request.method in AUDITABLE_METHODS and response.status_code < 400:
+            user = getattr(request.state, "user", None)
+            tenant = getattr(request.state, "tenant", None)
+            if user and tenant:
+                # Fire-and-forget: do not await, don't slow response
+                asyncio.create_task(self._publish_audit(request, response, user, tenant))
+
+        return response
+
+    async def _publish_audit(self, request, response, user, tenant):
+        event = {
+            "event_type":     "audit.action",
+            "tenant_id":      str(tenant.id),
+            "user_id":        str(user.sub),
+            "method":         request.method,
+            "path":           str(request.url.path),
+            "status_code":    response.status_code,
+            "correlation_id": getattr(request.state, "correlation_id", None),
+            "ip_address":     request.client.host,
+            "user_agent":     request.headers.get("user-agent"),
+            "timestamp":      datetime.utcnow().isoformat(),
+        }
+        await self.broker.publish("audit.events", event)
+```
+
+---
+
+### 14.10 MW-9: Global Error Handler
+
+**Purpose**: Convert all unhandled exceptions to the standard response envelope. No stack traces leak to clients.
+
+```python
+# app/middleware/error_handler.py
+from fastapi import Request
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from app.core.exceptions import (
+    PermissionDeniedError, TenantNotFoundError,
+    ResourceNotFoundError, ConflictError
+)
+
+def register_exception_handlers(app):
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError):
+        return JSONResponse(status_code=422, content={
+            "status": "error",
+            "errors": [
+                {"code": "VALIDATION_ERROR", "field": ".".join(str(l) for l in e["loc"][1:]),
+                 "message": e["msg"]}
+                for e in exc.errors()
+            ]
+        })
+
+    @app.exception_handler(PermissionDeniedError)
+    async def permission_denied(request: Request, exc: PermissionDeniedError):
+        return JSONResponse(status_code=403, content={
+            "status": "error",
+            "errors": [{"code": "PERMISSION_DENIED", "message": str(exc),
+                        "resource": exc.resource, "action": exc.action}]
+        })
+
+    @app.exception_handler(ResourceNotFoundError)
+    async def not_found(request: Request, exc: ResourceNotFoundError):
+        return JSONResponse(status_code=404, content={
+            "status": "error",
+            "errors": [{"code": "NOT_FOUND", "message": str(exc)}]
+        })
+
+    @app.exception_handler(Exception)
+    async def generic_error(request: Request, exc: Exception):
+        # Log full traceback to Application Insights
+        logger.exception("Unhandled exception", extra={
+            "correlation_id": getattr(request.state, "correlation_id", ""),
+        })
+        return JSONResponse(status_code=500, content={
+            "status": "error",
+            "errors": [{"code": "INTERNAL_ERROR",
+                        "message": "An internal error occurred. Please try again."}]
+        })
+```
+
+---
+
+## 15. WebSocket Architecture (Notifications & Chat)
+
+### 15.1 Overview
+
+Two distinct WebSocket channels are maintained per authenticated user:
+
+| Channel | Path | Purpose |
+|---------|------|---------|
+| **Notification WS** | `/ws/v1/notifications` | Server-push: system alerts, permission changes, report updates |
+| **Chat Agent WS** | `/ws/v1/chat` | Bidirectional: user queries → AI agent → streaming responses |
+
+```
+Browser
+  │
+  ├── REST API (HTTP)         → All CRUD, menu, Power BI token APIs
+  │
+  ├── WS /ws/v1/notifications → Server pushes JSON events (one-way from server)
+  │
+  └── WS /ws/v1/chat          → Full duplex: user sends query, server streams AI response
+```
+
+### 15.2 WebSocket Authentication Flow
+
+WebSocket connections carry the access token in the URL query string because browser WebSocket API does not support custom headers.
+
+```
+Client → GET /ws/v1/notifications?token=<access_token>
+              │
+              ▼
+         FastAPI WebSocket endpoint
+              │
+         [1] Extract token from query params
+         [2] JWTService.decode_access_token(token) → claims
+         [3] TenantService.resolve(claims.tid) → tenant
+         [4] SessionValidation — check Redis for revocation
+         [5] PermissionEngine.check("notifications", "view")
+              │
+         [OK] → Accept WebSocket upgrade; register connection
+         [FAIL]→ Close(code=4001, reason="Unauthorized")
+```
+
+**Connection Manager** (shared across both channels):
+
+```python
+# app/core/websocket_manager.py
+import asyncio
+from collections import defaultdict
+from typing import Dict, Set
+from fastapi import WebSocket
+
+class ConnectionManager:
+    """
+    Manages all active WebSocket connections.
+    Connections are indexed by tenant_id and user_id for targeted delivery.
+    """
+
+    def __init__(self):
+        # { tenant_id: { user_id: Set[WebSocket] } }
+        self._connections: Dict[str, Dict[str, Set[WebSocket]]] = defaultdict(
+            lambda: defaultdict(set)
+        )
+        self._lock = asyncio.Lock()
+
+    async def connect(self, websocket: WebSocket, tenant_id: str, user_id: str):
+        await websocket.accept()
+        async with self._lock:
+            self._connections[tenant_id][user_id].add(websocket)
+
+    async def disconnect(self, websocket: WebSocket, tenant_id: str, user_id: str):
+        async with self._lock:
+            self._connections[tenant_id][user_id].discard(websocket)
+
+    async def send_to_user(self, tenant_id: str, user_id: str, message: dict):
+        """Push to all active connections of a specific user."""
+        sockets = self._connections.get(tenant_id, {}).get(user_id, set()).copy()
+        dead = set()
+        for ws in sockets:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                dead.add(ws)
+        for ws in dead:
+            await self.disconnect(ws, tenant_id, user_id)
+
+    async def broadcast_to_tenant(self, tenant_id: str, message: dict):
+        """Push to all users in a tenant (e.g., permission change broadcast)."""
+        tenant_sockets = self._connections.get(tenant_id, {})
+        for user_id in list(tenant_sockets.keys()):
+            await self.send_to_user(tenant_id, user_id, message)
+
+# Global singleton
+ws_manager = ConnectionManager()
+```
+
+---
+
+### 15.3 Notification WebSocket
+
+**Endpoint** (`app/api/v1/websocket.py`):
+
+```python
+# app/api/v1/websocket.py
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from app.core.websocket_manager import ws_manager
+from app.core.security import JWTService
+from app.services.session_service import SessionService
+
+router = APIRouter()
+
+@router.websocket("/ws/v1/notifications")
+async def notifications_ws(
+    websocket: WebSocket,
+    token: str = Query(..., description="JWT access token"),
+):
+    # --- Auth ---
+    try:
+        claims = jwt_service.decode_access_token(token)
+    except Exception:
+        await websocket.close(code=4001, reason="Invalid or expired token")
+        return
+
+    if await session_service.is_revoked(claims["jti"]):
+        await websocket.close(code=4001, reason="Session revoked")
+        return
+
+    tenant_id = claims["tid"]
+    user_id   = claims["sub"]
+
+    # --- Connect ---
+    await ws_manager.connect(websocket, tenant_id, user_id)
+
+    # Send connection acknowledgement
+    await websocket.send_json({
+        "type":    "connection.established",
+        "user_id": user_id,
+        "message": "Connected to Vesper Notification Service",
+    })
+
+    try:
+        # Heartbeat loop — keep connection alive
+        # Server only pushes; client sends ping to maintain connection
+        while True:
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_text("pong")
+            # Ignore any other client messages on this channel
+
+    except WebSocketDisconnect:
+        await ws_manager.disconnect(websocket, tenant_id, user_id)
+```
+
+**Notification Payload Schema**:
+```json
+{
+  "type": "notification.info | notification.warning | notification.error | permission.changed | report.ready | system.maintenance",
+  "id": "uuid",
+  "title": "Report Generated",
+  "message": "Your Q4 Sales report is ready to download.",
+  "action_url": "/reports/q4-sales-2025",
+  "severity": "info | warning | error",
+  "metadata": {},
+  "timestamp": "2026-02-26T10:30:00Z",
+  "read": false
+}
+```
+
+**Notification Types**:
+
+| Type | Trigger | Target |
+|------|---------|--------|
+| `notification.info` | Report ready, sync complete | Specific user |
+| `notification.warning` | Password expiry, quota near | Specific user |
+| `notification.error` | Sync failed, embed error | Specific user or admin |
+| `permission.changed` | Role/group updated | Affected user(s) |
+| `report.ready` | Power BI report embed ready | Specific user |
+| `system.maintenance` | Scheduled downtime | Entire tenant |
+| `chat.response` | AI agent response chunk | Specific user |
+
+**Pushing from Services**:
+```python
+# Any backend service can push to a user via the manager
+await ws_manager.send_to_user(
+    tenant_id=tenant_id,
+    user_id=user_id,
+    message={
+        "type": "report.ready",
+        "id": str(uuid.uuid4()),
+        "title": "Power BI Report Ready",
+        "message": "Your embedded report token has been refreshed.",
+        "metadata": {"report_id": report_id},
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+)
+```
+
+---
+
+### 15.4 Database Schema for Notifications
+
+```sql
+-- ═══════════════════════════════════════════════════════════════
+-- NOTIFICATION SYSTEM
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE notifications (
+    id              UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWSEQUENTIALID(),
+    tenant_id       UNIQUEIDENTIFIER NOT NULL REFERENCES tenants(id),
+    user_id         UNIQUEIDENTIFIER NULL REFERENCES users(id),  -- NULL = broadcast to tenant
+    notification_type VARCHAR(50)    NOT NULL,
+    title           NVARCHAR(200)   NOT NULL,
+    message         NVARCHAR(1000)  NOT NULL,
+    action_url      VARCHAR(500)    NULL,
+    severity        VARCHAR(20)     NOT NULL DEFAULT 'info'
+                      CHECK (severity IN ('info','warning','error','success')),
+    metadata        NVARCHAR(MAX)   NULL,        -- JSON: extra context
+    is_read         BIT             NOT NULL DEFAULT 0,
+    read_at         DATETIME2       NULL,
+    expires_at      DATETIME2       NULL,        -- Auto-cleanup old notifications
+    created_at      DATETIME2       NOT NULL DEFAULT SYSUTCDATETIME()
+);
+CREATE INDEX ix_notifications_user ON notifications(tenant_id, user_id, is_read, created_at DESC);
+```
+
+**Notification REST APIs** (complement WebSocket push):
+
+| Method | Endpoint | Description | Auth |
+|--------|----------|-------------|------|
+| `GET` | `/api/v1/notifications` | List user's notifications (paginated) | Bearer |
+| `PATCH` | `/api/v1/notifications/{id}/read` | Mark notification as read | Bearer |
+| `POST` | `/api/v1/notifications/read-all` | Mark all as read | Bearer |
+| `DELETE` | `/api/v1/notifications/{id}` | Delete notification | Bearer |
+| `GET` | `/api/v1/notifications/unread-count` | Unread badge count | Bearer |
+
+---
+
+## 16. AI Chat Agent — LangChain & LangGraph
+
+### 16.1 Architecture Overview
+
+The AI Chat Agent allows users to ask natural language questions about their business data. It routes queries through a multi-agent orchestration layer built with **LangGraph**, calls specialized sub-agents (SQL, BI, summarization), and streams responses back via WebSocket.
+
+```
+User (WebSocket)
+    │  "What were the top 5 products by revenue last quarter?"
+    ▼
+Chat WebSocket Endpoint (/ws/v1/chat)
+    │
+    ▼
+Chat Session Manager
+    │  Load conversation history from Redis/DB
+    ▼
+LangGraph Orchestrator Agent
+    │
+    ├──► Intent Classifier Agent
+    │       └─► Determines: "sql_query | powerbi_query | general_insights | system_help"
+    │
+    ├──► [if sql_query]    SQL Agent
+    │       ├─ Generate SQL from natural language (LLM)
+    │       ├─ Validate & sanitize (read-only, tenant-scoped)
+    │       ├─ Execute against Azure SQL (via read replica)
+    │       └─ Format results as table/JSON
+    │
+    ├──► [if powerbi_query] BI Insights Agent
+    │       ├─ Identify relevant Power BI report/dataset
+    │       ├─ Call Power BI REST API for embedded data
+    │       └─ Summarize using LLM
+    │
+    ├──► [if general_insights] Analytics Aggregation Agent
+    │       ├─ Query pre-computed analytics from Redis/SQL
+    │       └─ Format insights with trend analysis
+    │
+    └──► Response Synthesizer Agent
+            ├─ Combine all sub-agent outputs
+            ├─ Generate natural language summary (LLM streaming)
+            └─ Stream chunks via WebSocket → user
+
+Each chunk pushed via ws_manager.send_to_user() as it is generated
+```
+
+### 16.2 Database Schema for Chat
+
+```sql
+-- ═══════════════════════════════════════════════════════════════
+-- AI CHAT SESSIONS & HISTORY
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE chat_sessions (
+    id              UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWSEQUENTIALID(),
+    tenant_id       UNIQUEIDENTIFIER NOT NULL REFERENCES tenants(id),
+    user_id         UNIQUEIDENTIFIER NOT NULL REFERENCES users(id),
+    session_title   NVARCHAR(200)   NULL,           -- Auto-generated from first message
+    status          VARCHAR(20)     NOT NULL DEFAULT 'active'
+                      CHECK (status IN ('active','archived','deleted')),
+    created_at      DATETIME2       NOT NULL DEFAULT SYSUTCDATETIME(),
+    updated_at      DATETIME2       NOT NULL DEFAULT SYSUTCDATETIME()
+);
+
+CREATE TABLE chat_messages (
+    id              UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWSEQUENTIALID(),
+    session_id      UNIQUEIDENTIFIER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+    tenant_id       UNIQUEIDENTIFIER NOT NULL REFERENCES tenants(id),
+    user_id         UNIQUEIDENTIFIER NOT NULL REFERENCES users(id),
+    role            VARCHAR(20)     NOT NULL CHECK (role IN ('user','assistant','system','tool')),
+    content         NVARCHAR(MAX)   NOT NULL,
+    tool_calls      NVARCHAR(MAX)   NULL,           -- JSON: tool invocations made by agent
+    tool_results    NVARCHAR(MAX)   NULL,           -- JSON: results returned to agent
+    tokens_used     INT             NULL,
+    model_name      VARCHAR(100)    NULL,           -- e.g. 'claude-sonnet-4-6'
+    latency_ms      INT             NULL,
+    created_at      DATETIME2       NOT NULL DEFAULT SYSUTCDATETIME()
+);
+CREATE INDEX ix_chat_messages_session ON chat_messages(session_id, created_at);
+
+CREATE TABLE chat_agent_tools (
+    id              UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWSEQUENTIALID(),
+    tenant_id       UNIQUEIDENTIFIER NOT NULL REFERENCES tenants(id),
+    tool_name       VARCHAR(100)    NOT NULL,        -- 'sql_query', 'powerbi_data', 'trend_analysis'
+    is_enabled      BIT             NOT NULL DEFAULT 1,
+    config          NVARCHAR(MAX)   NULL,            -- JSON: tool-specific config per tenant
+    CONSTRAINT uq_tenant_tool UNIQUE (tenant_id, tool_name)
+);
+```
+
+---
+
+### 16.3 Chat WebSocket Endpoint
+
+```python
+# app/api/v1/chat_ws.py
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from app.agents.orchestrator import ChatOrchestrator
+from app.core.websocket_manager import ws_manager
+
+router = APIRouter()
+
+@router.websocket("/ws/v1/chat")
+async def chat_ws(
+    websocket: WebSocket,
+    token: str = Query(...),
+    session_id: str = Query(None, description="Resume existing chat session"),
+):
+    # --- Auth (same as notifications) ---
+    try:
+        claims = jwt_service.decode_access_token(token)
+    except Exception:
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
+    # --- Permission check: user must have 'ai.chat:use' permission ---
+    engine = PermissionEngine(await get_db_session(), cache)
+    result = await engine.check_permission(
+        user_id=claims["sub"],
+        tenant_id=claims["tid"],
+        resource_key="ai.chat",
+        action_key="use",
+    )
+    if not result.allowed:
+        await websocket.close(code=4003, reason="Permission denied: ai.chat:use")
+        return
+
+    tenant_id = claims["tid"]
+    user_id   = claims["sub"]
+
+    # Create or resume chat session
+    session = await chat_service.get_or_create_session(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        session_id=session_id,
+    )
+
+    await ws_manager.connect(websocket, tenant_id, user_id)
+    await websocket.send_json({
+        "type":       "chat.session.started",
+        "session_id": str(session.id),
+        "message":    "Connected to Vesper AI Assistant",
+    })
+
+    orchestrator = ChatOrchestrator(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        session_id=str(session.id),
+        websocket=websocket,
+    )
+
+    try:
+        while True:
+            raw = await websocket.receive_json()
+            msg_type = raw.get("type")
+
+            if msg_type == "chat.message":
+                # Non-blocking: stream response chunks as they arrive
+                await orchestrator.handle_message(
+                    content=raw["content"],
+                    attachments=raw.get("attachments", []),
+                )
+
+            elif msg_type == "chat.stop":
+                await orchestrator.stop_generation()
+
+            elif msg_type == "ping":
+                await websocket.send_json({"type": "pong"})
+
+    except WebSocketDisconnect:
+        await ws_manager.disconnect(websocket, tenant_id, user_id)
+```
+
+**Message Protocol (Client → Server)**:
+```json
+{
+  "type": "chat.message",
+  "content": "What were the top 5 products by revenue last quarter?",
+  "attachments": []
+}
+```
+
+**Message Protocol (Server → Client, streaming)**:
+```json
+// Chunk (streamed as LLM generates)
+{"type": "chat.chunk", "session_id": "...", "content": "The top 5 products", "done": false}
+{"type": "chat.chunk", "session_id": "...", "content": " by revenue last quarter were:", "done": false}
+
+// Tool invocation notification (visible to user as "Thinking...")
+{"type": "chat.tool_call", "tool": "sql_query", "status": "running", "description": "Querying sales database..."}
+{"type": "chat.tool_call", "tool": "sql_query", "status": "done", "result_summary": "7 rows returned"}
+
+// Final completion
+{"type": "chat.done", "session_id": "...", "message_id": "...", "tokens_used": 423}
+
+// Error
+{"type": "chat.error", "code": "TOOL_ERROR", "message": "Failed to query database"}
+```
+
+---
+
+### 16.4 LangGraph Orchestrator
+
+```python
+# app/agents/orchestrator.py
+from langchain_anthropic import ChatAnthropic
+from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import ToolNode
+from app.agents.tools import (
+    sql_query_tool,
+    powerbi_data_tool,
+    trend_analysis_tool,
+    general_knowledge_tool,
+)
+
+# ── State definition ──────────────────────────────────────────
+from typing import TypedDict, Annotated, Sequence
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+import operator
+
+class AgentState(TypedDict):
+    messages:       Annotated[Sequence[BaseMessage], operator.add]
+    tenant_id:      str
+    user_id:        str
+    session_id:     str
+    intent:         str | None
+    tool_outputs:   list
+    final_response: str | None
+
+# ── LLM ──────────────────────────────────────────────────────
+llm = ChatAnthropic(
+    model="claude-sonnet-4-6",
+    api_key=settings.ANTHROPIC_API_KEY,
+    streaming=True,
+    max_tokens=4096,
+)
+
+# ── Tools ─────────────────────────────────────────────────────
+tools = [
+    sql_query_tool,
+    powerbi_data_tool,
+    trend_analysis_tool,
+    general_knowledge_tool,
+]
+llm_with_tools = llm.bind_tools(tools)
+
+# ── Graph Nodes ───────────────────────────────────────────────
+
+async def intent_classifier(state: AgentState) -> AgentState:
+    """Classify the user's intent to route to the right agent."""
+    system = """You are a business analytics assistant for Vesper Analytics.
+    Classify the user's intent as one of:
+    - sql_query: Needs live data from the database
+    - powerbi_insight: Needs insights from Power BI reports
+    - trend_analysis: Needs trend/comparison analysis
+    - general: General business question answerable from context
+
+    Respond with just the classification label."""
+
+    last_msg = state["messages"][-1].content
+    classification = await llm.ainvoke([
+        {"role": "system", "content": system},
+        {"role": "user",   "content": last_msg},
+    ])
+    return {"intent": classification.content.strip()}
+
+
+async def agent_node(state: AgentState) -> AgentState:
+    """Main reasoning agent with access to all tools."""
+    system = f"""You are Vesper AI, a business intelligence assistant.
+    Tenant ID: {state['tenant_id']}
+    You have access to tools to query the database, retrieve Power BI insights,
+    and perform trend analysis. Always scope queries to the current tenant.
+    Be concise, accurate, and cite your sources (tool results).
+    Today's date: {datetime.utcnow().strftime('%Y-%m-%d')}"""
+
+    messages = [{"role": "system", "content": system}] + [
+        {"role": m.type, "content": m.content} for m in state["messages"]
+    ]
+    response = await llm_with_tools.ainvoke(messages)
+    return {"messages": [response]}
+
+
+def should_continue(state: AgentState) -> str:
+    """Decide whether to call tools or finish."""
+    last = state["messages"][-1]
+    if hasattr(last, "tool_calls") and last.tool_calls:
+        return "tools"
+    return END
+
+
+# ── Graph Assembly ─────────────────────────────────────────────
+def build_agent_graph() -> StateGraph:
+    graph = StateGraph(AgentState)
+
+    graph.add_node("intent_classifier", intent_classifier)
+    graph.add_node("agent",             agent_node)
+    graph.add_node("tools",             ToolNode(tools))
+
+    graph.set_entry_point("intent_classifier")
+    graph.add_edge("intent_classifier", "agent")
+    graph.add_conditional_edges("agent", should_continue, {
+        "tools": "tools",
+        END:     END,
+    })
+    graph.add_edge("tools", "agent")  # Loop: tools → agent → tools (until done)
+
+    return graph.compile()
+
+# ── Orchestrator class ─────────────────────────────────────────
+class ChatOrchestrator:
+    _graph = build_agent_graph()
+
+    def __init__(self, tenant_id, user_id, session_id, websocket):
+        self.tenant_id  = tenant_id
+        self.user_id    = user_id
+        self.session_id = session_id
+        self.ws         = websocket
+
+    async def handle_message(self, content: str, attachments: list):
+        # Load conversation history
+        history = await chat_service.get_history(self.session_id, limit=20)
+
+        initial_state: AgentState = {
+            "messages":       history + [HumanMessage(content=content)],
+            "tenant_id":      self.tenant_id,
+            "user_id":        self.user_id,
+            "session_id":     self.session_id,
+            "intent":         None,
+            "tool_outputs":   [],
+            "final_response": None,
+        }
+
+        # Stream through LangGraph
+        async for chunk in self._graph.astream(initial_state):
+            node_name = list(chunk.keys())[0]
+            node_output = chunk[node_name]
+
+            if node_name == "tools":
+                # Notify client about tool invocations
+                for tool_msg in node_output.get("messages", []):
+                    await self.ws.send_json({
+                        "type":        "chat.tool_call",
+                        "tool":        tool_msg.name,
+                        "status":      "done",
+                        "result_summary": str(tool_msg.content)[:200],
+                    })
+
+            elif node_name == "agent":
+                # Stream LLM response text chunks
+                for msg in node_output.get("messages", []):
+                    if hasattr(msg, "content") and msg.content:
+                        await self.ws.send_json({
+                            "type":    "chat.chunk",
+                            "session_id": self.session_id,
+                            "content": msg.content,
+                            "done":    False,
+                        })
+
+        # Save to DB
+        await chat_service.save_message(
+            session_id=self.session_id,
+            role="assistant",
+            content=final_content,
+        )
+
+        await self.ws.send_json({
+            "type":       "chat.done",
+            "session_id": self.session_id,
+        })
+```
+
+---
+
+### 16.5 LangChain Tool Implementations
+
+```python
+# app/agents/tools.py
+from langchain_core.tools import tool
+from app.db.read_replica import get_read_db
+from app.core.sql_validator import validate_safe_sql
+
+@tool
+async def sql_query_tool(
+    query: str,
+    tenant_id: str,
+    description: str = "Execute a read-only SQL query against the tenant's business data.",
+) -> str:
+    """
+    Execute a natural language query translated to safe, read-only SQL.
+    Always scoped to the current tenant via tenant_id.
+
+    Args:
+        query: The SQL SELECT statement to execute (no DDL/DML allowed)
+        tenant_id: Tenant scope for Row-Level Security
+
+    Returns:
+        JSON-formatted query results (max 1000 rows)
+    """
+    # Safety: validate SQL is SELECT-only, no system tables, no cross-tenant refs
+    if not validate_safe_sql(query):
+        return "Error: Only SELECT statements on business tables are permitted."
+
+    async with get_read_db(tenant_id) as db:
+        result = await db.execute(text(query))
+        rows = result.mappings().fetchmany(1000)
+        return json.dumps([dict(r) for r in rows], default=str)
+
+
+@tool
+async def powerbi_data_tool(
+    report_name: str,
+    metric: str,
+    tenant_id: str,
+    description: str = "Retrieve summary metrics from a Power BI report dataset.",
+) -> str:
+    """
+    Fetch aggregated data from a specific Power BI report.
+
+    Args:
+        report_name: The Power BI report name (e.g., 'Sales Performance')
+        metric: The metric to retrieve (e.g., 'total_revenue', 'top_products')
+        tenant_id: Tenant scope
+
+    Returns:
+        JSON with metric value and context
+    """
+    report = await powerbi_service.get_report_by_name(tenant_id, report_name)
+    if not report:
+        return f"Report '{report_name}' not found."
+
+    data = await powerbi_service.get_dataset_values(
+        tenant_id=tenant_id,
+        dataset_id=report.dataset_id,
+        metric=metric,
+    )
+    return json.dumps(data, default=str)
+
+
+@tool
+async def trend_analysis_tool(
+    metric: str,
+    period: str,
+    tenant_id: str,
+    description: str = "Analyze trends for a business metric over a time period.",
+) -> str:
+    """
+    Perform trend analysis on pre-computed analytics data.
+
+    Args:
+        metric: Metric name (e.g., 'monthly_revenue', 'user_signups')
+        period: Time period ('last_7d', 'last_30d', 'last_quarter', 'last_year')
+        tenant_id: Tenant scope
+
+    Returns:
+        JSON with trend data, percentage change, and statistical summary
+    """
+    data = await analytics_service.get_trend(tenant_id, metric, period)
+    return json.dumps(data, default=str)
+```
+
+---
+
+### 16.6 Chat REST APIs (Session Management)
+
+| Method | Endpoint | Description | Auth |
+|--------|----------|-------------|------|
+| `GET` | `/api/v1/chat/sessions` | List user's chat sessions | Bearer |
+| `POST` | `/api/v1/chat/sessions` | Create new chat session | Bearer |
+| `GET` | `/api/v1/chat/sessions/{id}` | Get session details | Bearer |
+| `DELETE` | `/api/v1/chat/sessions/{id}` | Archive/delete session | Bearer |
+| `GET` | `/api/v1/chat/sessions/{id}/messages` | Get full message history | Bearer |
+| `GET` | `/api/v1/chat/tools` | List available agent tools for tenant | Bearer |
+| `PUT` | `/api/v1/chat/tools/{tool_name}` | Enable/disable tool (tenant admin) | Bearer + `admin.ai:configure` |
+
+---
+
+## 17. Power BI Integration & Backend-Controlled Menu System
+
+### 17.1 Design Philosophy
+
+The backend is the **sole authority** on:
+1. Which menu items a user sees
+2. Which Power BI reports map to each menu item
+3. The embed token required to render each report
+4. Sub-menu structure and ordering
+5. Whether an item is visible, disabled, or conditionally shown
+
+The frontend **never** hardcodes menu items or Power BI URLs. It renders whatever the backend returns.
+
+```
+Backend Controls:
+  menu_items table  → defines the navigation tree
+  powerbi_reports   → maps menu items to Power BI workspaces + report IDs
+  role_permission_map → gates each menu item behind RBAC
+  PowerBI API call  → generates time-limited embed tokens per user
+
+Frontend Flow:
+  GET /api/v1/navigation/menu
+    → Returns: filtered menu tree (only items user can see)
+    → Each menu item has: label, icon, route, type, sub_items[]
+    → If type = 'powerbi': also includes embed_config reference
+
+  GET /api/v1/powerbi/reports/{menu_item_id}/embed-token
+    → Returns: embed_url, embed_token, token_expiry
+    → Frontend renders <PowerBIEmbed> component with these values
+```
+
+---
+
+### 17.2 Database Schema for Menu & Power BI
+
+```sql
+-- ═══════════════════════════════════════════════════════════════
+-- MENU & NAVIGATION SYSTEM
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE menu_items (
+    id                  UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWSEQUENTIALID(),
+    tenant_id           UNIQUEIDENTIFIER NOT NULL REFERENCES tenants(id),
+    parent_id           UNIQUEIDENTIFIER NULL REFERENCES menu_items(id), -- NULL = top-level
+    label               NVARCHAR(100)   NOT NULL,
+    icon                VARCHAR(100)    NULL,         -- Icon name from icon library
+    route               VARCHAR(200)    NULL,         -- Frontend route (e.g. '/reports/sales')
+    item_type           VARCHAR(30)     NOT NULL DEFAULT 'page'
+                          CHECK (item_type IN (
+                              'page',          -- Standard React page
+                              'powerbi',       -- Embedded Power BI report
+                              'powerbi_group', -- Group of Power BI reports
+                              'external_link', -- External URL
+                              'divider',       -- Visual separator
+                              'group_header'   -- Non-clickable section label
+                          )),
+    sort_order          INT             NOT NULL DEFAULT 0,
+    is_active           BIT             NOT NULL DEFAULT 1,
+    is_new_tab          BIT             NOT NULL DEFAULT 0,   -- Open in new browser tab
+    badge_text          NVARCHAR(20)    NULL,                 -- e.g. 'NEW', 'BETA'
+    tooltip             NVARCHAR(300)   NULL,
+    -- RBAC: the resource_key that must have 'view' permission for this item to appear
+    resource_key        VARCHAR(100)    NOT NULL,             -- Links to resources table
+    created_at          DATETIME2       NOT NULL DEFAULT SYSUTCDATETIME(),
+    updated_at          DATETIME2       NOT NULL DEFAULT SYSUTCDATETIME(),
+    created_by          UNIQUEIDENTIFIER NULL
+);
+CREATE INDEX ix_menu_items_tenant ON menu_items(tenant_id, parent_id, sort_order)
+    WHERE is_active = 1;
+
+-- ═══════════════════════════════════════════════════════════════
+-- POWER BI REPORT REGISTRY
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE powerbi_reports (
+    id                  UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWSEQUENTIALID(),
+    tenant_id           UNIQUEIDENTIFIER NOT NULL REFERENCES tenants(id),
+    menu_item_id        UNIQUEIDENTIFIER NOT NULL REFERENCES menu_items(id),
+    display_name        NVARCHAR(200)   NOT NULL,
+    description         NVARCHAR(500)   NULL,
+
+    -- Power BI service references
+    workspace_id        VARCHAR(100)    NOT NULL,    -- Power BI Workspace (Group) ID
+    report_id           VARCHAR(100)    NOT NULL,    -- Power BI Report ID
+    dataset_id          VARCHAR(100)    NULL,        -- Power BI Dataset ID (for Q&A)
+    page_name           VARCHAR(100)    NULL,        -- Specific report page (optional)
+
+    -- Embed configuration
+    embed_type          VARCHAR(30)     NOT NULL DEFAULT 'report'
+                          CHECK (embed_type IN ('report','dashboard','tile','visual')),
+    filter_pane_enabled BIT             NOT NULL DEFAULT 1,
+    nav_pane_enabled    BIT             NOT NULL DEFAULT 0,
+    default_filters     NVARCHAR(MAX)   NULL,        -- JSON: pre-applied filters
+    rls_roles           NVARCHAR(MAX)   NULL,        -- JSON: Power BI RLS roles to apply
+
+    -- Token lifecycle
+    token_ttl_minutes   INT             NOT NULL DEFAULT 60,
+    is_active           BIT             NOT NULL DEFAULT 1,
+    created_at          DATETIME2       NOT NULL DEFAULT SYSUTCDATETIME(),
+    updated_at          DATETIME2       NOT NULL DEFAULT SYSUTCDATETIME(),
+    CONSTRAINT uq_powerbi_menu_item UNIQUE (tenant_id, menu_item_id)
+);
+
+-- ═══════════════════════════════════════════════════════════════
+-- POWER BI TENANT SERVICE CREDENTIALS
+-- ═══════════════════════════════════════════════════════════════
+-- Stored per tenant so each tenant uses their own Azure AD app registration
+
+CREATE TABLE powerbi_tenant_config (
+    id                  UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWSEQUENTIALID(),
+    tenant_id           UNIQUEIDENTIFIER NOT NULL REFERENCES tenants(id) UNIQUE,
+    azure_tenant_id     VARCHAR(100)    NOT NULL,    -- Customer's Azure tenant
+    client_id           VARCHAR(100)    NOT NULL,    -- App registration with PBI permissions
+    client_secret_ref   VARCHAR(200)    NOT NULL,    -- Azure Key Vault reference
+    service_account_upn VARCHAR(320)    NULL,        -- Optional: service account email
+    embed_token_type    VARCHAR(20)     NOT NULL DEFAULT 'ServicePrincipal'
+                          CHECK (embed_token_type IN ('ServicePrincipal','MasterUser')),
+    is_active           BIT             NOT NULL DEFAULT 1,
+    created_at          DATETIME2       NOT NULL DEFAULT SYSUTCDATETIME()
+);
+
+-- ═══════════════════════════════════════════════════════════════
+-- EMBED TOKEN CACHE (Track issued tokens for reuse within TTL)
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE powerbi_embed_tokens (
+    id                  UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWSEQUENTIALID(),
+    tenant_id           UNIQUEIDENTIFIER NOT NULL REFERENCES tenants(id),
+    report_id           UNIQUEIDENTIFIER NOT NULL REFERENCES powerbi_reports(id),
+    user_id             UNIQUEIDENTIFIER NOT NULL REFERENCES users(id),
+    token_value         VARCHAR(2000)   NOT NULL,    -- Encrypted embed token
+    embed_url           VARCHAR(500)    NOT NULL,
+    expires_at          DATETIME2       NOT NULL,
+    created_at          DATETIME2       NOT NULL DEFAULT SYSUTCDATETIME()
+);
+CREATE INDEX ix_pbi_tokens_user_report ON powerbi_embed_tokens(
+    tenant_id, user_id, report_id, expires_at DESC
+);
+```
+
+---
+
+### 17.3 Power BI Service (Token Generation)
+
+```python
+# app/services/powerbi_service.py
+import aiohttp
+from azure.identity.aio import ClientSecretCredential
+from app.services.vault_service import VaultService
+from app.services.cache_service import CacheService
+
+POWER_BI_SCOPE = "https://analysis.windows.net/powerbi/api/.default"
+POWER_BI_API   = "https://api.powerbi.com/v1.0/myorg"
+
+class PowerBIService:
+
+    def __init__(self, vault: VaultService, cache: CacheService):
+        self.vault = vault
+        self.cache = cache
+
+    async def _get_access_token(self, config: PowerBITenantConfig) -> str:
+        """Get Azure AD access token for Power BI API using Service Principal."""
+        cache_key = f"pbi_access_token:{config.tenant_id}"
+        cached = await self.cache.get(cache_key)
+        if cached:
+            return cached
+
+        secret = await self.vault.get_secret(config.client_secret_ref)
+
+        credential = ClientSecretCredential(
+            tenant_id=config.azure_tenant_id,
+            client_id=config.client_id,
+            client_secret=secret,
+        )
+        token = await credential.get_token(POWER_BI_SCOPE)
+        # Cache with buffer (expire 5 min before actual expiry)
+        ttl = max(0, int(token.expires_on - time.time()) - 300)
+        await self.cache.set(cache_key, token.token, ttl=ttl)
+        return token.token
+
+    async def generate_embed_token(
+        self,
+        tenant_id: str,
+        report: PowerBIReport,
+        user_id: str,
+        user_email: str,
+    ) -> dict:
+        """
+        Generate a Power BI embed token for a specific report and user.
+        Applies Row-Level Security (RLS) if configured.
+        """
+        # Check for valid cached token first
+        cache_key = f"pbi_embed:{tenant_id}:{report.id}:{user_id}"
+        cached = await self.cache.get(cache_key)
+        if cached:
+            return cached
+
+        config = await self.get_tenant_config(tenant_id)
+        access_token = await self._get_access_token(config)
+
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type":  "application/json",
+        }
+
+        # Build embed token request
+        body = {
+            "reports": [{"id": report.report_id}],
+            "datasets": [{"id": report.dataset_id}] if report.dataset_id else [],
+        }
+
+        # Apply Power BI RLS if configured
+        if report.rls_roles:
+            rls_roles = json.loads(report.rls_roles)
+            body["identities"] = [{
+                "username": user_email,
+                "roles":    rls_roles,
+                "datasets": [report.dataset_id],
+            }]
+
+        async with aiohttp.ClientSession() as session:
+            # Step 1: Get embed URL for the report
+            async with session.get(
+                f"{POWER_BI_API}/groups/{report.workspace_id}/reports/{report.report_id}",
+                headers=headers
+            ) as resp:
+                report_meta = await resp.json()
+                embed_url = report_meta["embedUrl"]
+
+            # Step 2: Generate embed token
+            async with session.post(
+                f"{POWER_BI_API}/GenerateToken",
+                headers=headers,
+                json=body,
+            ) as resp:
+                token_resp = await resp.json()
+
+        result = {
+            "embed_url":     embed_url,
+            "embed_token":   token_resp["token"],
+            "token_id":      token_resp["tokenId"],
+            "expiration":    token_resp["expiration"],
+            "report_id":     report.report_id,
+            "workspace_id":  report.workspace_id,
+            "page_name":     report.page_name,
+            "settings": {
+                "filter_pane_enabled": report.filter_pane_enabled,
+                "nav_pane_enabled":    report.nav_pane_enabled,
+            },
+            "default_filters": json.loads(report.default_filters) if report.default_filters else [],
+        }
+
+        # Cache the embed token (TTL = report.token_ttl_minutes - 5 min buffer)
+        ttl = (report.token_ttl_minutes - 5) * 60
+        await self.cache.set(cache_key, result, ttl=ttl)
+
+        # Notify user via WebSocket when token is ready (useful for pre-fetching)
+        await ws_manager.send_to_user(tenant_id, user_id, {
+            "type":      "report.ready",
+            "report_id": report.report_id,
+            "expires_at": result["expiration"],
+        })
+
+        return result
+```
+
+---
+
+### 17.4 Menu API Implementation
+
+```python
+# app/api/v1/navigation.py
+from fastapi import APIRouter, Request, Depends
+from app.services.menu_service import MenuService
+from app.api.deps import get_current_user
+
+router = APIRouter(prefix="/api/v1/navigation", tags=["Navigation"])
+
+@router.get("/menu")
+async def get_menu(
+    request: Request,
+    db=Depends(get_db),
+):
+    """
+    Returns the complete navigation menu tree, filtered by the user's permissions.
+
+    The frontend should call this once after login and cache the result locally.
+    The menu is automatically filtered — the user only sees items they have access to.
+
+    On permission changes, the backend pushes a 'permission.changed' WebSocket event
+    and the frontend should re-fetch this endpoint.
+    """
+    user = request.state.user
+    engine = request.state.permission_engine
+
+    menu_service = MenuService(db, engine)
+
+    # Returns hierarchical filtered menu
+    menu = await menu_service.get_user_menu(
+        tenant_id=user.tid,
+        user_id=user.sub,
+    )
+
+    return {"status": "success", "data": menu}
+
+
+@router.get("/menu/{item_id}/sub-menu")
+async def get_sub_menu(
+    item_id: str,
+    request: Request,
+    db=Depends(get_db),
+):
+    """
+    Lazily load sub-menu items for a given parent menu item.
+    Used for deep menu hierarchies where not all levels are loaded upfront.
+    """
+    user = request.state.user
+    engine = request.state.permission_engine
+    menu_service = MenuService(db, engine)
+
+    sub_items = await menu_service.get_sub_menu(
+        tenant_id=user.tid,
+        user_id=user.sub,
+        parent_id=item_id,
+    )
+
+    return {"status": "success", "data": sub_items}
+```
+
+**Menu Service — Permission-Filtered Tree**:
+
+```python
+# app/services/menu_service.py
+class MenuService:
+
+    async def get_user_menu(self, tenant_id: str, user_id: str) -> list:
+        # Load all active menu items for tenant
+        all_items = await self.db.execute(
+            select(MenuItem)
+            .where(MenuItem.tenant_id == tenant_id)
+            .where(MenuItem.is_active == True)
+            .order_by(MenuItem.parent_id, MenuItem.sort_order)
+        )
+        all_items = all_items.scalars().all()
+
+        # Filter by user permissions (check each item's resource_key)
+        visible_items = []
+        for item in all_items:
+            result = await self.permission_engine.check_permission(
+                user_id=user_id,
+                tenant_id=tenant_id,
+                resource_key=item.resource_key,
+                action_key="view",
+            )
+            if result.allowed:
+                visible_items.append(item)
+
+        # Build tree structure
+        return self._build_tree(visible_items)
+
+    def _build_tree(self, items: list) -> list:
+        """Convert flat list to nested tree."""
+        item_map = {str(i.id): self._serialize(i) for i in items}
+        roots = []
+
+        for item in items:
+            serialized = item_map[str(item.id)]
+            if item.parent_id is None:
+                roots.append(serialized)
+            elif str(item.parent_id) in item_map:
+                parent = item_map[str(item.parent_id)]
+                parent.setdefault("sub_items", []).append(serialized)
+
+        return sorted(roots, key=lambda x: x["sort_order"])
+
+    def _serialize(self, item: MenuItem) -> dict:
+        return {
+            "id":         str(item.id),
+            "label":      item.label,
+            "icon":       item.icon,
+            "route":      item.route,
+            "item_type":  item.item_type,
+            "sort_order": item.sort_order,
+            "badge_text": item.badge_text,
+            "tooltip":    item.tooltip,
+            "is_new_tab": item.is_new_tab,
+            "sub_items":  [],
+        }
+```
+
+**Menu API Response Example**:
+```json
+{
+  "status": "success",
+  "data": [
+    {
+      "id": "uuid-1",
+      "label": "Dashboard",
+      "icon": "grid-2x2",
+      "route": "/dashboard",
+      "item_type": "page",
+      "sort_order": 1,
+      "badge_text": null,
+      "sub_items": []
+    },
+    {
+      "id": "uuid-2",
+      "label": "Analytics",
+      "icon": "bar-chart",
+      "route": null,
+      "item_type": "group_header",
+      "sort_order": 2,
+      "sub_items": [
+        {
+          "id": "uuid-3",
+          "label": "Sales Performance",
+          "icon": "trending-up",
+          "route": "/reports/sales",
+          "item_type": "powerbi",
+          "sort_order": 1,
+          "badge_text": "NEW",
+          "sub_items": []
+        },
+        {
+          "id": "uuid-4",
+          "label": "Customer Insights",
+          "icon": "users",
+          "route": "/reports/customers",
+          "item_type": "powerbi",
+          "sort_order": 2,
+          "badge_text": null,
+          "sub_items": []
+        }
+      ]
+    }
+  ]
+}
+```
+
+---
+
+### 17.5 Power BI Report APIs
+
+| Method | Endpoint | Description | Auth | Permission |
+|--------|----------|-------------|------|------------|
+| `GET` | `/api/v1/powerbi/reports` | List all Power BI reports for tenant | Bearer | `powerbi:view` |
+| `GET` | `/api/v1/powerbi/reports/{menu_item_id}` | Get report config for a menu item | Bearer | Per-item resource key |
+| `GET` | `/api/v1/powerbi/reports/{menu_item_id}/embed-token` | Generate embed token | Bearer | Per-item resource key |
+| `POST` | `/api/v1/powerbi/reports/{menu_item_id}/refresh-token` | Force refresh embed token | Bearer | Per-item resource key |
+| `GET` | `/api/v1/admin/powerbi/reports` | Admin: list all reports | Bearer | `admin.powerbi:view` |
+| `POST` | `/api/v1/admin/powerbi/reports` | Admin: create report mapping | Bearer | `admin.powerbi:create` |
+| `PUT` | `/api/v1/admin/powerbi/reports/{id}` | Admin: update report mapping | Bearer | `admin.powerbi:edit` |
+| `DELETE` | `/api/v1/admin/powerbi/reports/{id}` | Admin: remove report mapping | Bearer | `admin.powerbi:delete` |
+| `GET` | `/api/v1/admin/powerbi/config` | Get Power BI service config | Bearer | `admin.powerbi:configure` |
+| `PUT` | `/api/v1/admin/powerbi/config` | Update Power BI credentials | Bearer | `admin.powerbi:configure` |
+
+**Get Embed Token Response**:
+```json
+{
+  "status": "success",
+  "data": {
+    "report_id":     "pbi-report-uuid",
+    "workspace_id":  "pbi-workspace-uuid",
+    "embed_url":     "https://app.powerbi.com/reportEmbed?reportId=...&groupId=...",
+    "embed_token":   "H4sIAAAAAAAEAy2...",
+    "token_id":      "token-uuid",
+    "expiration":    "2026-02-26T12:30:00Z",
+    "page_name":     "ReportSection1",
+    "settings": {
+      "filter_pane_enabled": true,
+      "nav_pane_enabled":    false
+    },
+    "default_filters": [
+      {
+        "$schema": "http://powerbi.com/product/schema#basic",
+        "target": {"table": "Sales", "column": "Year"},
+        "operator": "In",
+        "values": [2025, 2026]
+      }
+    ]
+  }
+}
+```
+
+---
+
+### 17.6 Token Auto-Refresh Strategy
+
+Power BI embed tokens expire (default 60 min). The backend proactively refreshes them before expiry:
+
+```
+Strategy 1: Frontend-triggered refresh
+  - Frontend tracks token expiry_at from embed-token response
+  - 5 minutes before expiry, calls POST /api/v1/powerbi/reports/{id}/refresh-token
+  - Backend returns new token, frontend updates <PowerBIEmbed> component
+
+Strategy 2: Backend-pushed refresh (WebSocket)
+  - Background worker scans powerbi_embed_tokens table
+  - Finds tokens expiring within next 10 minutes
+  - Pre-generates new tokens via Power BI API
+  - Pushes 'report.token_refresh' event via WebSocket to each user
+  - Frontend receives event and calls embed-token API with ?use_cached=true
+
+Redis Cache Key: pbi_embed:{tenant_id}:{report_id}:{user_id}
+  TTL: (token_ttl_minutes - 5) * 60 seconds
+```
+
+---
+
+## 18. Complete API Reference — End-to-End
+
+This section catalogs every API endpoint in the order a frontend application would invoke them — from cold start to full operation.
+
+### 18.1 Phase 1: Tenant Resolution (Cold Start)
+
+Called by the React app before any other API, to discover which tenant the user belongs to.
+
+```
+GET /api/v1/tenants/resolve?domain={domain}
+
+Auth: None (public)
+```
+
+**Request**:
+```
+GET /api/v1/tenants/resolve?domain=analytics.acme-corp.com
+```
+
+**Response** `200 OK`:
+```json
+{
+  "status": "success",
+  "data": {
+    "tenant_id":      "uuid",
+    "tenant_slug":    "acme-corp",
+    "display_name":   "Acme Corporation",
+    "auth_methods":   ["entra", "form"],
+    "branding": {
+      "logo_url":          "https://cdn.vesper.com/tenants/acme/logo.svg",
+      "favicon_url":       "https://cdn.vesper.com/tenants/acme/favicon.ico",
+      "primary_color":     "#1A73E8",
+      "secondary_color":   "#F4F6F9",
+      "font_family":       "Inter, sans-serif",
+      "login_background_url": "https://cdn.vesper.com/tenants/acme/bg.jpg",
+      "custom_css":        ""
+    },
+    "features": {
+      "analytics_module": true,
+      "ai_chat_enabled":  true,
+      "powerbi_enabled":  true
+    },
+    "entra_config": {
+      "client_id":    "azure-app-client-id",
+      "authority_url": "https://login.microsoftonline.com/entra-tenant-id",
+      "scopes":        ["openid", "profile", "email"]
+    }
+  }
+}
+```
+
+**Frontend action**: Store `tenant_id`, apply branding, decide which login options to show.
+
+---
+
+### 18.2 Phase 2: Authentication
+
+#### 18.2.1 Form-Based Login
+
+```
+POST /api/v1/auth/login
+
+Auth: None (public)
+Rate limit: 5 requests/min per IP
+```
+
+**Request**:
+```json
+{
+  "email":      "alice@acme-corp.com",
+  "password":   "...",
+  "tenant_id":  "uuid"
+}
+```
+
+**Response** `200 OK`:
+```json
+{
+  "status": "success",
+  "data": {
+    "access_token":  "eyJ...",
+    "token_type":    "bearer",
+    "expires_in":    900,
+    "mfa_required":  false
+  }
+}
+```
+> Refresh token is set as `HttpOnly; SameSite=Strict; Secure` cookie (`vesper_refresh`).
+
+**Response when MFA required** `200 OK`:
+```json
+{
+  "status": "success",
+  "data": {
+    "access_token": null,
+    "mfa_required": true,
+    "mfa_token":    "partial-session-token",
+    "mfa_methods":  ["totp"]
+  }
+}
+```
+
+#### 18.2.2 MFA Verification
+
+```
+POST /api/v1/auth/mfa/verify
+
+Auth: mfa_token (from login response)
+```
+
+**Request**:
+```json
+{
+  "mfa_token": "partial-session-token",
+  "code":      "123456"
+}
+```
+
+**Response** `200 OK`: Same as successful login (access_token + refresh cookie).
+
+#### 18.2.3 Microsoft Entra SSO
+
+```
+GET /api/v1/auth/entra/authorize?tenant_id={uuid}
+
+Auth: None (redirects to Microsoft)
+```
+
+Backend generates the PKCE challenge and returns the Microsoft authorization URL. Frontend redirects the user there.
+
+```
+GET /api/v1/auth/entra/callback?code={code}&state={state}
+
+Auth: None (callback from Microsoft)
+```
+
+Backend exchanges code for tokens, provisions user if first login, issues Vesper JWT.
+
+#### 18.2.4 Token Refresh
+
+```
+POST /api/v1/auth/refresh
+
+Auth: HttpOnly refresh token cookie (automatic)
+```
+
+**Response** `200 OK`:
+```json
+{
+  "status": "success",
+  "data": {
+    "access_token": "eyJ...",
+    "expires_in":   900
+  }
+}
+```
+
+#### 18.2.5 Logout
+
+```
+POST /api/v1/auth/logout
+
+Auth: Bearer (access token)
+```
+
+Revokes the current session. Clears refresh token cookie.
+
+#### 18.2.6 JWKS Endpoint (for token verification)
+
+```
+GET /api/v1/auth/.well-known/jwks.json
+
+Auth: None (public)
+```
+
+Returns public key set for JWT signature verification.
+
+---
+
+### 18.3 Phase 3: Post-Login Bootstrap
+
+Called immediately after successful login. These three calls can be made in parallel.
+
+#### 18.3.1 Get Current User Profile
+
+```
+GET /api/v1/users/me
+
+Auth: Bearer
+```
+
+**Response**:
+```json
+{
+  "status": "success",
+  "data": {
+    "id":           "user-uuid",
+    "email":        "alice@acme-corp.com",
+    "display_name": "Alice Johnson",
+    "first_name":   "Alice",
+    "last_name":    "Johnson",
+    "avatar_url":   "https://...",
+    "user_type":    "standard",
+    "auth_provider":"entra",
+    "mfa_enabled":  true,
+    "roles":        ["analyst"],
+    "groups":       ["finance", "reporting"],
+    "last_login_at":"2026-02-26T09:00:00Z"
+  }
+}
+```
+
+#### 18.3.2 Get Permission Matrix
+
+```
+GET /api/v1/users/me/permissions
+
+Auth: Bearer
+```
+
+Returns the complete permission matrix. Cached in Redis (TTL 5 min).
+
+**Response**:
+```json
+{
+  "status": "success",
+  "data": {
+    "dashboard":                       {"view": true},
+    "dashboard.revenue_chart":         {"view": true},
+    "dashboard.export_button":         {"view": false},
+    "reports":                         {"view": true, "export": true},
+    "reports.sales":                   {"view": true, "export": true},
+    "reports.customers":               {"view": true, "export": false},
+    "admin.users":                     {"view": false},
+    "ai.chat":                         {"use": true},
+    "powerbi.sales_performance":       {"view": true},
+    "powerbi.customer_insights":       {"view": false}
+  }
+}
+```
+
+**Frontend action**: Store in `PermissionProvider` context. Gate all UI elements using this data. On `permission.changed` WebSocket event, re-fetch this endpoint.
+
+#### 18.3.3 Get Navigation Menu
+
+```
+GET /api/v1/navigation/menu
+
+Auth: Bearer
+```
+
+Returns the permission-filtered menu tree (see Section 17.4 for full schema).
+
+---
+
+### 18.4 Phase 4: Menu-Driven Navigation
+
+#### 18.4.1 Sub-Menu Lazy Loading
+
+```
+GET /api/v1/navigation/menu/{item_id}/sub-menu
+
+Auth: Bearer
+```
+
+For deep hierarchies — load sub-items on demand when user expands a menu section.
+
+#### 18.4.2 Menu Item Detail
+
+```
+GET /api/v1/navigation/menu/{item_id}
+
+Auth: Bearer
+```
+
+Get metadata for a specific menu item (type, route, Power BI config reference).
+
+---
+
+### 18.5 Phase 5: Power BI Report Loading
+
+When user navigates to a Power BI menu item (item_type = 'powerbi'):
+
+#### Step 1 — Get Report Config + Embed Token
+
+```
+GET /api/v1/powerbi/reports/{menu_item_id}/embed-token
+
+Auth: Bearer
+Permission: [menu item's resource_key]:view
+```
+
+Single API call that returns everything the frontend needs to render the report.
+
+**Response** (see Section 17.5 for full schema).
+
+#### Step 2 — Report Renders in Frontend
+
+Frontend uses the `embedUrl` + `embedToken` to initialize the Power BI JavaScript SDK. No credentials are ever passed to the frontend — only the short-lived embed token.
+
+#### Step 3 — Token Auto-Refresh
+
+```
+POST /api/v1/powerbi/reports/{menu_item_id}/refresh-token
+
+Auth: Bearer
+```
+
+Called by frontend 5 minutes before token expiry. Returns fresh embed token. If a valid cached token exists in Redis it is returned without a new Power BI API call.
+
+---
+
+### 18.6 Phase 6: Real-Time Connections
+
+After the page loads, establish WebSocket connections:
+
+```
+# Notifications
+WS  /ws/v1/notifications?token={access_token}
+
+# Chat Agent (on-demand, when user opens chat)
+WS  /ws/v1/chat?token={access_token}&session_id={optional}
+```
+
+---
+
+### 18.7 User Management APIs
+
+| Method | Endpoint | Description | Auth | Permission |
+|--------|----------|-------------|------|------------|
+| `GET` | `/api/v1/users` | List users (paginated, filtered) | Bearer | `admin.users:view` |
+| `POST` | `/api/v1/users` | Create user | Bearer | `admin.users:create` |
+| `GET` | `/api/v1/users/{id}` | Get user detail | Bearer | `admin.users:view` |
+| `PUT` | `/api/v1/users/{id}` | Update user profile | Bearer | `admin.users:edit` |
+| `PATCH` | `/api/v1/users/{id}/status` | Activate/deactivate user | Bearer | `admin.users:edit` |
+| `DELETE` | `/api/v1/users/{id}` | Deactivate user | Bearer | `admin.users:delete` |
+| `GET` | `/api/v1/users/{id}/roles` | Get user's roles | Bearer | `admin.users:view` |
+| `PUT` | `/api/v1/users/{id}/roles` | Set user roles | Bearer | `admin.users:edit` |
+| `GET` | `/api/v1/users/{id}/groups` | Get user's groups | Bearer | `admin.users:view` |
+| `PUT` | `/api/v1/users/{id}/groups` | Set user groups | Bearer | `admin.users:edit` |
+| `GET` | `/api/v1/users/{id}/permissions` | Get effective permissions | Bearer | `admin.users:view` |
+| `GET` | `/api/v1/users/me` | Current user profile | Bearer | — |
+| `PUT` | `/api/v1/users/me` | Update own profile | Bearer | — |
+| `POST` | `/api/v1/users/me/change-password` | Change own password | Bearer | — |
+| `GET` | `/api/v1/users/me/permissions` | Own permission matrix | Bearer | — |
+| `GET` | `/api/v1/users/me/sessions` | Active sessions | Bearer | — |
+| `DELETE` | `/api/v1/users/me/sessions/{id}` | Revoke a session | Bearer | — |
+
+---
+
+### 18.8 Group Management APIs
+
+| Method | Endpoint | Description | Auth | Permission |
+|--------|----------|-------------|------|------------|
+| `GET` | `/api/v1/groups` | List groups | Bearer | `admin.groups:view` |
+| `POST` | `/api/v1/groups` | Create group | Bearer | `admin.groups:create` |
+| `GET` | `/api/v1/groups/{id}` | Get group detail | Bearer | `admin.groups:view` |
+| `PUT` | `/api/v1/groups/{id}` | Update group | Bearer | `admin.groups:edit` |
+| `DELETE` | `/api/v1/groups/{id}` | Delete group | Bearer | `admin.groups:delete` |
+| `GET` | `/api/v1/groups/{id}/members` | List group members | Bearer | `admin.groups:view` |
+| `POST` | `/api/v1/groups/{id}/members` | Add members to group | Bearer | `admin.groups:edit` |
+| `DELETE` | `/api/v1/groups/{id}/members/{user_id}` | Remove member | Bearer | `admin.groups:edit` |
+| `GET` | `/api/v1/groups/{id}/roles` | Get group's roles | Bearer | `admin.groups:view` |
+| `PUT` | `/api/v1/groups/{id}/roles` | Set group roles | Bearer | `admin.groups:edit` |
+
+---
+
+### 18.9 Role & Permission APIs
+
+| Method | Endpoint | Description | Auth | Permission |
+|--------|----------|-------------|------|------------|
+| `GET` | `/api/v1/roles` | List roles | Bearer | `admin.roles:view` |
+| `POST` | `/api/v1/roles` | Create role | Bearer | `admin.roles:create` |
+| `GET` | `/api/v1/roles/{id}` | Get role detail | Bearer | `admin.roles:view` |
+| `PUT` | `/api/v1/roles/{id}` | Update role | Bearer | `admin.roles:edit` |
+| `DELETE` | `/api/v1/roles/{id}` | Delete role (non-system) | Bearer | `admin.roles:delete` |
+| `GET` | `/api/v1/roles/{id}/permissions` | Get role's permission matrix | Bearer | `admin.roles:view` |
+| `PUT` | `/api/v1/roles/{id}/permissions` | Bulk update permissions | Bearer | `admin.roles:edit` |
+| `GET` | `/api/v1/resources` | List all resources | Bearer | `admin.roles:view` |
+| `POST` | `/api/v1/resources` | Register new resource | Bearer | `super_admin` |
+| `GET` | `/api/v1/permissions/matrix` | Full permission matrix grid | Bearer | `admin.roles:view` |
+
+---
+
+### 18.10 Navigation & Menu Admin APIs
+
+| Method | Endpoint | Description | Auth | Permission |
+|--------|----------|-------------|------|------------|
+| `GET` | `/api/v1/navigation/menu` | Get user's filtered menu | Bearer | — (filtered by perms) |
+| `GET` | `/api/v1/navigation/menu/{id}/sub-menu` | Lazy-load sub-items | Bearer | — (filtered) |
+| `GET` | `/api/v1/admin/navigation/menu` | Admin: full menu tree (all items) | Bearer | `admin.menu:view` |
+| `POST` | `/api/v1/admin/navigation/menu` | Admin: create menu item | Bearer | `admin.menu:create` |
+| `PUT` | `/api/v1/admin/navigation/menu/{id}` | Admin: update menu item | Bearer | `admin.menu:edit` |
+| `DELETE` | `/api/v1/admin/navigation/menu/{id}` | Admin: delete menu item | Bearer | `admin.menu:delete` |
+| `POST` | `/api/v1/admin/navigation/menu/reorder` | Admin: reorder items | Bearer | `admin.menu:edit` |
+| `GET` | `/api/v1/admin/navigation/menu/{id}/assign-report` | Get report assignment | Bearer | `admin.menu:view` |
+| `PUT` | `/api/v1/admin/navigation/menu/{id}/assign-report` | Assign Power BI report | Bearer | `admin.menu:edit` |
+
+---
+
+### 18.11 AI Chat APIs
+
+| Method | Endpoint | Description | Auth | Permission |
+|--------|----------|-------------|------|------------|
+| `WS` | `/ws/v1/chat` | Bidirectional chat WebSocket | Bearer (query param) | `ai.chat:use` |
+| `GET` | `/api/v1/chat/sessions` | List chat sessions | Bearer | `ai.chat:use` |
+| `POST` | `/api/v1/chat/sessions` | Create session | Bearer | `ai.chat:use` |
+| `GET` | `/api/v1/chat/sessions/{id}` | Get session | Bearer | `ai.chat:use` |
+| `DELETE` | `/api/v1/chat/sessions/{id}` | Delete session | Bearer | `ai.chat:use` |
+| `GET` | `/api/v1/chat/sessions/{id}/messages` | Get history (paginated) | Bearer | `ai.chat:use` |
+| `GET` | `/api/v1/chat/tools` | List enabled agent tools | Bearer | `ai.chat:use` |
+| `PUT` | `/api/v1/admin/chat/tools/{name}` | Enable/disable tool | Bearer | `admin.ai:configure` |
+
+---
+
+### 18.12 Notification APIs
+
+| Method | Endpoint | Description | Auth |
+|--------|----------|-------------|------|
+| `WS` | `/ws/v1/notifications` | Notification push channel | Bearer (query param) |
+| `GET` | `/api/v1/notifications` | List notifications | Bearer |
+| `GET` | `/api/v1/notifications/unread-count` | Unread count for badge | Bearer |
+| `PATCH` | `/api/v1/notifications/{id}/read` | Mark as read | Bearer |
+| `POST` | `/api/v1/notifications/read-all` | Mark all as read | Bearer |
+| `DELETE` | `/api/v1/notifications/{id}` | Delete notification | Bearer |
+
+---
+
+### 18.13 Tenant Management APIs (Super Admin)
+
+| Method | Endpoint | Description | Auth | Role |
+|--------|----------|-------------|------|------|
+| `GET` | `/api/v1/tenants` | List all tenants | Bearer | `super_admin` |
+| `POST` | `/api/v1/tenants` | Create tenant | Bearer | `super_admin` |
+| `GET` | `/api/v1/tenants/{id}` | Tenant detail | Bearer | `super_admin` |
+| `PUT` | `/api/v1/tenants/{id}` | Update tenant | Bearer | `super_admin` |
+| `PATCH` | `/api/v1/tenants/{id}/status` | Suspend/activate | Bearer | `super_admin` |
+| `POST` | `/api/v1/tenants/{id}/domains` | Add custom domain | Bearer | `super_admin` |
+| `DELETE` | `/api/v1/tenants/{id}/domains/{domain_id}` | Remove domain | Bearer | `super_admin` |
+| `GET` | `/api/v1/tenants/{id}/config` | Get config values | Bearer | `super_admin` |
+| `PUT` | `/api/v1/tenants/{id}/config` | Update config values | Bearer | `super_admin` |
+| `GET` | `/api/v1/tenants/{id}/theme` | Get theme | Bearer | `tenant_admin` |
+| `PUT` | `/api/v1/tenants/{id}/theme` | Update theme/branding | Bearer | `tenant_admin` |
+
+---
+
+### 18.14 Entra Integration APIs
+
+| Method | Endpoint | Description | Auth | Permission |
+|--------|----------|-------------|------|------------|
+| `GET` | `/api/v1/auth/entra/authorize` | Start Entra OIDC flow | Public | — |
+| `GET` | `/api/v1/auth/entra/callback` | Entra OIDC callback | Public | — |
+| `GET` | `/api/v1/entra/config` | Get Entra OIDC config | Bearer | `admin.entra:view` |
+| `PUT` | `/api/v1/entra/config` | Update Entra config | Bearer | `admin.entra:edit` |
+| `GET` | `/api/v1/entra/groups` | List Entra group mappings | Bearer | `admin.entra:view` |
+| `POST` | `/api/v1/entra/groups/map` | Create group mapping | Bearer | `admin.entra:edit` |
+| `DELETE` | `/api/v1/entra/groups/map/{id}` | Remove group mapping | Bearer | `admin.entra:edit` |
+| `POST` | `/api/v1/entra/sync` | Trigger manual group sync | Bearer | `admin.entra:sync` |
+| `GET` | `/api/v1/entra/sync/status` | Get last sync status | Bearer | `admin.entra:view` |
+
+---
+
+### 18.15 Audit & System APIs
+
+| Method | Endpoint | Description | Auth | Permission |
+|--------|----------|-------------|------|------------|
+| `GET` | `/api/v1/audit/logs` | Query audit log | Bearer | `admin.audit:view` |
+| `GET` | `/api/v1/audit/login-history` | Login history | Bearer | `admin.audit:view` |
+| `GET` | `/api/v1/health` | Health check | Public | — |
+| `GET` | `/api/v1/health/ready` | Readiness check (DB + Redis) | Public | — |
+| `GET` | `/api/v1/versions` | API version discovery | Public | — |
+| `GET` | `/api/v1/auth/.well-known/jwks.json` | Public key set | Public | — |
+
+---
+
+## 19. Frontend Integration Guide
+
+### 19.1 Application Bootstrap Sequence
+
+```
+App Start (user visits analytics.acme-corp.com)
+    │
+    ▼
+[1] GET /api/v1/tenants/resolve?domain=analytics.acme-corp.com
+    → Apply branding, font, colors immediately (before any login)
+    → Show correct login method(s): [Login with Microsoft] or [Email/Password] or both
+    │
+    ▼
+[2] User logs in (form or Entra SSO)
+    → Receive: access_token (in memory), refresh_token (HttpOnly cookie)
+    │
+    ▼
+[3] Parallel bootstrap calls:
+    ├── GET /api/v1/users/me              → Store user profile in context
+    ├── GET /api/v1/users/me/permissions  → Store in PermissionProvider
+    └── GET /api/v1/navigation/menu       → Build sidebar navigation tree
+    │
+    ▼
+[4] Open WebSocket connections (background):
+    ├── WS /ws/v1/notifications?token=...
+    └── (WS /ws/v1/chat lazily — only when user opens chat panel)
+    │
+    ▼
+[5] Render application shell:
+    ├── Sidebar: from menu data (already filtered by backend)
+    ├── All UI elements gated by PermissionGate using permission matrix
+    └── Navigate user to their default route
+```
+
+---
+
+### 19.2 Token Lifecycle Management (Frontend)
+
+```typescript
+// src/services/authService.ts
+
+class AuthService {
+  private accessToken: string | null = null;   // In-memory only (not localStorage)
+  private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+  setAccessToken(token: string, expiresIn: number) {
+    this.accessToken = token;
+    // Schedule refresh 60 seconds before expiry
+    this.scheduleRefresh(expiresIn - 60);
+  }
+
+  private scheduleRefresh(seconds: number) {
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    this.refreshTimer = setTimeout(() => this.refresh(), seconds * 1000);
+  }
+
+  async refresh(): Promise<void> {
+    try {
+      // Refresh token is in HttpOnly cookie — sent automatically
+      const res = await apiClient.post('/api/v1/auth/refresh');
+      this.setAccessToken(res.data.data.access_token, res.data.data.expires_in);
+    } catch {
+      // Refresh failed → force re-login
+      this.logout();
+    }
+  }
+
+  getAuthHeader(): string {
+    return `Bearer ${this.accessToken}`;
+  }
+}
+
+// Axios interceptor: auto-attach token
+apiClient.interceptors.request.use(config => {
+  config.headers.Authorization = authService.getAuthHeader();
+  return config;
+});
+
+// Axios interceptor: handle 401 globally
+apiClient.interceptors.response.use(
+  res => res,
+  async err => {
+    if (err.response?.status === 401) {
+      await authService.refresh();
+      return apiClient(err.config);  // Retry original request
+    }
+    return Promise.reject(err);
+  }
+);
+```
+
+---
+
+### 19.3 Power BI Embedding (React Component)
+
+```typescript
+// src/components/PowerBIReportViewer.tsx
+import { models, Report } from 'powerbi-client';
+import { PowerBIEmbed } from 'powerbi-client-react';
+import { useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { powerbiService } from '../services/powerbiService';
+
+interface Props {
+  menuItemId: string;
+}
+
+export function PowerBIReportViewer({ menuItemId }: Props) {
+  const [report, setReport] = useState<Report | null>(null);
+
+  // Fetch embed token from backend
+  const { data, isLoading, refetch } = useQuery({
+    queryKey: ['pbi-embed-token', menuItemId],
+    queryFn: () => powerbiService.getEmbedToken(menuItemId),
+    staleTime: Infinity,  // We manage refresh ourselves
+  });
+
+  // Auto-refresh token 5 minutes before expiry
+  useEffect(() => {
+    if (!data) return;
+    const expiresAt = new Date(data.expiration).getTime();
+    const refreshAt = expiresAt - 5 * 60 * 1000;  // 5 min before
+    const delay = Math.max(0, refreshAt - Date.now());
+
+    const timer = setTimeout(async () => {
+      await powerbiService.refreshToken(menuItemId);
+      refetch();
+    }, delay);
+
+    return () => clearTimeout(timer);
+  }, [data]);
+
+  // Also listen for WebSocket token refresh events
+  const { socket } = useNotificationSocket();
+  useEffect(() => {
+    if (!socket) return;
+    socket.addEventListener('message', (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'report.token_refresh' && msg.report_id === data?.report_id) {
+        refetch();
+      }
+    });
+  }, [socket, data]);
+
+  if (isLoading) return <ReportSkeleton />;
+
+  return (
+    <PowerBIEmbed
+      embedConfig={{
+        type:          data!.embed_type ?? 'report',
+        id:            data!.report_id,
+        embedUrl:      data!.embed_url,
+        accessToken:   data!.embed_token,
+        tokenType:     models.TokenType.Embed,
+        pageName:      data!.page_name ?? undefined,
+        filters:       data!.default_filters,
+        settings: {
+          filterPaneEnabled: data!.settings.filter_pane_enabled,
+          navContentPaneEnabled: data!.settings.nav_pane_enabled,
+          background: models.BackgroundType.Transparent,
+        },
+      }}
+      getEmbeddedComponent={(embedded) => setReport(embedded as Report)}
+      cssClassName="powerbi-report-frame"
+    />
+  );
+}
+```
+
+---
+
+### 19.4 WebSocket Notification Client
+
+```typescript
+// src/hooks/useNotificationSocket.ts
+import { useEffect, useRef, useCallback } from 'react';
+import { useAuth } from './useAuth';
+import { useQueryClient } from '@tanstack/react-query';
+
+export function useNotificationSocket() {
+  const { accessToken } = useAuth();
+  const wsRef = useRef<WebSocket | null>(null);
+  const queryClient = useQueryClient();
+
+  const connect = useCallback(() => {
+    if (!accessToken) return;
+    const wsUrl = `${WS_BASE_URL}/ws/v1/notifications?token=${accessToken}`;
+    const ws = new WebSocket(wsUrl);
+
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      handleNotification(msg);
+    };
+
+    ws.onclose = () => {
+      // Reconnect after 3 seconds (exponential backoff in production)
+      setTimeout(connect, 3000);
+    };
+
+    // Heartbeat: send ping every 30 seconds
+    const heartbeat = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) ws.send('ping');
+    }, 30_000);
+
+    ws.onclose = () => {
+      clearInterval(heartbeat);
+      setTimeout(connect, 3000);
+    };
+
+    wsRef.current = ws;
+  }, [accessToken]);
+
+  function handleNotification(msg: any) {
+    switch (msg.type) {
+      case 'permission.changed':
+        // Re-fetch permission matrix and menu
+        queryClient.invalidateQueries({ queryKey: ['permissions'] });
+        queryClient.invalidateQueries({ queryKey: ['navigation-menu'] });
+        showToast('Your permissions have been updated.', 'info');
+        break;
+
+      case 'notification.info':
+      case 'notification.warning':
+      case 'notification.error':
+        queryClient.invalidateQueries({ queryKey: ['notifications-count'] });
+        showToast(msg.message, msg.severity);
+        break;
+
+      case 'report.ready':
+      case 'report.token_refresh':
+        queryClient.invalidateQueries({ queryKey: ['pbi-embed-token'] });
+        break;
+
+      case 'system.maintenance':
+        showMaintenanceBanner(msg.message, msg.metadata?.scheduled_at);
+        break;
+    }
+  }
+
+  useEffect(() => {
+    connect();
+    return () => wsRef.current?.close();
+  }, [connect]);
+
+  return { socket: wsRef.current };
+}
+```
+
+---
+
+### 19.5 Menu Rendering & Dynamic Navigation
+
+```typescript
+// src/components/layout/Sidebar.tsx
+import { useQuery } from '@tanstack/react-query';
+import { navigationService } from '../../services/navigationService';
+import { NavItem } from './NavItem';
+
+export function Sidebar() {
+  const { data: menu, isLoading } = useQuery({
+    queryKey:  ['navigation-menu'],
+    queryFn:   navigationService.getMenu,
+    staleTime: 5 * 60 * 1000,  // 5 minutes; refreshed by permission.changed WS event
+  });
+
+  if (isLoading) return <SidebarSkeleton />;
+
+  return (
+    <nav className="sidebar">
+      {menu?.data.map((item) => (
+        <NavItem key={item.id} item={item} />
+      ))}
+    </nav>
+  );
+}
+
+// NavItem handles all item types
+function NavItem({ item }: { item: MenuItem }) {
+  // No permission check here — backend already filtered the list
+  switch (item.item_type) {
+    case 'page':
+      return <Link to={item.route}>{item.label}</Link>;
+
+    case 'powerbi':
+      return <Link to={`/reports/${item.id}`}>{item.label}</Link>;
+      // Route renders: <PowerBIReportViewer menuItemId={item.id} />
+
+    case 'powerbi_group':
+    case 'group_header':
+      return (
+        <div className="nav-group">
+          <span className="nav-group-label">{item.label}</span>
+          {item.sub_items.map((child) => (
+            <NavItem key={child.id} item={child} />
+          ))}
+        </div>
+      );
+
+    case 'divider':
+      return <hr className="nav-divider" />;
+
+    case 'external_link':
+      return (
+        <a href={item.route} target={item.is_new_tab ? '_blank' : '_self'}>
+          {item.label}
+        </a>
+      );
+  }
+}
+```
+
+---
+
+### 19.6 Content Security Policy Update for Power BI
+
+Power BI embedding requires adding Power BI domains to the CSP:
+
+```
+Content-Security-Policy:
+  default-src 'self';
+  script-src 'self' https://cdn.powerbi.com;
+  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+  font-src 'self' https://fonts.gstatic.com;
+  img-src 'self' data: https://cdn.vesper.com https://*.blob.core.windows.net
+          https://*.powerbi.com;
+  connect-src 'self'
+              https://*.vesper-api.com
+              https://login.microsoftonline.com
+              https://api.powerbi.com
+              wss://*.vesper-api.com;
+  frame-src 'self' https://app.powerbi.com https://analysis.windows.net;
+  frame-ancestors 'none';
+  base-uri 'self';
+```
+
+> **Note**: `wss://` must be explicitly listed in `connect-src` for WebSocket connections. `frame-src` must include `app.powerbi.com` for the embedded `<iframe>` to load.
+
+---
+
+### 19.7 Redis Cache Keys — Complete Reference
+
+| Purpose | Key Pattern | TTL |
+|---------|-------------|-----|
+| Session validation | `session:{user_id}` | 15 min |
+| Token revocation | `revoked_token:{jti}` | Until token expiry |
+| Permission matrix | `perm_matrix:{tenant_id}:{user_id}` | 5 min |
+| Per-permission check | `perm:{tenant_id}:{user_id}:{resource}:{action}` | 5 min |
+| Tenant config | `tenant_config:{domain}` | 10 min |
+| Rate limiting | `rate:{identifier}:{endpoint_class}` | Window duration |
+| Power BI access token | `pbi_access_token:{tenant_id}` | Token expiry - 5 min |
+| Power BI embed token | `pbi_embed:{tenant_id}:{report_id}:{user_id}` | Token TTL - 5 min |
+| Menu tree | `menu:{tenant_id}` | 10 min |
+| Chat session history | `chat_history:{session_id}` | 24 hours |
+| AI tool results | `ai_tool:{tenant_id}:{tool}:{query_hash}` | 5 min |
+
+---
+
+### 19.8 WebSocket Message Type Registry
+
+| Type | Direction | Description |
+|------|-----------|-------------|
+| `connection.established` | Server → Client | Connection confirmed |
+| `ping` | Client → Server | Keepalive |
+| `pong` | Server → Client | Keepalive response |
+| `notification.info` | Server → Client | Informational notification |
+| `notification.warning` | Server → Client | Warning notification |
+| `notification.error` | Server → Client | Error notification |
+| `permission.changed` | Server → Client | User's permissions were updated |
+| `report.ready` | Server → Client | Power BI report embed token ready |
+| `report.token_refresh` | Server → Client | Token refreshed proactively |
+| `system.maintenance` | Server → Client | Platform maintenance notice |
+| `chat.session.started` | Server → Client | Chat session confirmed |
+| `chat.message` | Client → Server | User sends a message |
+| `chat.chunk` | Server → Client | Streaming LLM response chunk |
+| `chat.tool_call` | Server → Client | Agent is invoking a tool |
+| `chat.done` | Server → Client | Response generation complete |
+| `chat.error` | Server → Client | Agent encountered an error |
+| `chat.stop` | Client → Server | User requests stop generation |
+
+---
+
 **Document End**
 
-*This document serves as the architectural blueprint for the Vesper Analytics multi-tenant platform. All design decisions should be reviewed and approved before implementation begins. Implementation should proceed in phases, starting with the core tenant and user management system, followed by the RBAC engine, Entra integration, and finally the frontend permission system.*
+*This document serves as the architectural blueprint for the Vesper Analytics multi-tenant platform. All design decisions should be reviewed and approved before implementation begins. Implementation should proceed in phases, starting with the core tenant and user management system, followed by the RBAC engine, Entra integration, WebSocket infrastructure, AI Chat Agent, Power BI integration, and finally the frontend permission system.*

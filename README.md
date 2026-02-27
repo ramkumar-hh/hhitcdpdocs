@@ -1,34 +1,79 @@
-# Vesper Analytics Platform - Technical Design Document
+# Vesper Analytics Platform — Technical Design Document
 
-**Document Version:** 1.0
-**Date:** 2026-02-20
-**Classification:** Internal - Confidential
+**Document Version:** 2.0
+**Date:** 2026-02-26
+**Classification:** Internal — Confidential
 **Author:** Engineering Team
-**Audience:** CTO, Engineering Leadership
+**Audience:** CTO, Engineering Leadership, Backend Engineers, Frontend Engineers, DevOps
+
+---
+
+## How to Read This Document
+
+This document is organised in seven logical parts, progressing from architecture concepts through security foundations, backend implementation, advanced platform features, frontend integration, and finally to API reference and operations. The progression mirrors the recommended build sequence for the platform.
+
+**Audience guide — focus on these parts based on your role:**
+
+| Role | Recommended Sections |
+|------|---------------------|
+| **Solutions Architect / CTO** | Parts I & II — Sections 1–5 |
+| **Backend Engineer** | Parts III, IV & V — Sections 6–14 |
+| **Frontend Engineer** | Parts I, VI & §18 — Sections 1–3, 16–17, 18 |
+| **DevOps / Infrastructure** | Parts I, II & VII — Sections 1–5, 18 |
+| **Security Reviewer** | Sections 4, 7, 10 in full |
+| **New Team Member** | Read all parts in order |
+
+**Document conventions:**
+- *Tenant* and *organisation* are used interchangeably throughout.
+- A *resource* in RBAC context means a permission target (page, section, button) — not an Azure cloud resource.
+- All REST API paths use the `/api/v1/` prefix. WebSocket paths use `/ws/v1/`.
+- Code blocks show canonical implementation patterns; adapt configuration to your environment.
 
 ---
 
 ## Table of Contents
 
+**PART I — PLATFORM OVERVIEW**
 1. [Executive Summary](#1-executive-summary)
 2. [System Architecture Overview](#2-system-architecture-overview)
 3. [Multi-Tenant Architecture](#3-multi-tenant-architecture)
-4. [Database Design](#4-database-design)
-5. [User Management & RBAC System](#5-user-management--rbac-system)
-6. [Authentication & Identity](#6-authentication--identity)
-7. [Backend Architecture (FastAPI)](#7-backend-architecture-fastapi)
-8. [Frontend Architecture (React)](#8-frontend-architecture-react)
-9. [Caching, Messaging & Broker Architecture](#9-caching-messaging--broker-architecture)
-10. [Security Architecture](#10-security-architecture)
-11. [Azure Deployment & Infrastructure](#11-azure-deployment--infrastructure)
-12. [API Design & Versioning](#12-api-design--versioning)
-13. [Appendix: Entity Relationship Diagrams](#13-appendix-entity-relationship-diagrams)
-14. [Middleware Implementation (Full Stack)](#14-middleware-implementation-full-stack)
-15. [WebSocket Architecture (Notifications & Chat)](#15-websocket-architecture-notifications--chat)
-16. [AI Chat Agent — LangChain & LangGraph](#16-ai-chat-agent--langchain--langgraph)
-17. [Power BI Integration & Backend-Controlled Menu System](#17-power-bi-integration--backend-controlled-menu-system)
+
+**PART II — SECURITY & DATA FOUNDATION**
+4. [Security Architecture](#4-security-architecture)
+5. [Database Design](#5-database-design)
+
+**PART III — USER MANAGEMENT & ACCESS CONTROL**
+6. [User Management & RBAC System](#6-user-management--rbac-system)
+7. [Authentication & Identity](#7-authentication--identity)
+
+**PART IV — BACKEND IMPLEMENTATION**
+8. [Backend Architecture (FastAPI)](#8-backend-architecture-fastapi)
+9. [API Design & Versioning Standards](#9-api-design--versioning-standards)
+10. [Middleware Implementation (Full Stack)](#10-middleware-implementation-full-stack)
+11. [Caching, Messaging & Broker Architecture](#11-caching-messaging--broker-architecture)
+
+**PART V — PLATFORM FEATURES**
+12. [WebSocket Architecture (Notifications & Chat)](#12-websocket-architecture-notifications--chat)
+13. [AI Chat Agent — LangChain & LangGraph](#13-ai-chat-agent--langchain--langgraph)
+14. [Power BI Integration & Backend-Controlled Menu System](#14-power-bi-integration--backend-controlled-menu-system)
+15. [File Upload — SharePoint & OneLake Integration](#15-file-upload--sharepoint--onelake-integration)
+
+**PART VI — FRONTEND**
+16. [Frontend Architecture (React)](#16-frontend-architecture-react)
+17. [Frontend Integration Guide](#17-frontend-integration-guide)
+
+**PART VII — REFERENCE & OPERATIONS**
 18. [Complete API Reference — End-to-End](#18-complete-api-reference--end-to-end)
-19. [Frontend Integration Guide](#19-frontend-integration-guide)
+19. [Azure Deployment & Infrastructure](#19-azure-deployment--infrastructure)
+20. [Appendix: Entity Relationship Diagrams](#20-appendix-entity-relationship-diagrams)
+
+---
+
+---
+
+## PART I — PLATFORM OVERVIEW
+
+*This part introduces the Vesper Analytics platform: its purpose, the complete high-level system architecture (including WebSocket, AI Agent, and Power BI channels), and the multi-tenancy strategy that underpins every design decision in this document. Read this part first regardless of your role.*
 
 ---
 
@@ -59,6 +104,24 @@ Vesper Analytics is a **multi-tenant SaaS platform** enabling organizations to l
 | CDN/DNS | - | Azure Front Door + DNS Zones |
 | Secrets | - | Azure Key Vault |
 | Monitoring | - | Azure Monitor + Application Insights |
+
+
+
+### 1.4 Implementation Roadmap
+
+The platform is built incrementally in six phases. Each phase is independently deployable and testable before the next begins.
+
+| Phase | Focus Area | Key Sections | Deliverables |
+|-------|-----------|-------------|-------------|
+| **Phase 1** | Foundation | §4, §5, §7 | Azure infrastructure, full database schema with RLS, JWT auth service (login / logout / refresh / Entra OIDC) |
+| **Phase 2** | Multi-Tenancy & RBAC | §3, §5, §6 | Tenant domain resolution, user / group / role management APIs, permission engine with Redis cache |
+| **Phase 3** | Backend Core | §8, §9, §10 | FastAPI project, 9-layer middleware pipeline, API versioning and response standards |
+| **Phase 4** | Infrastructure | §11, §18 | Redis caching layers, Service Bus event topics, CI/CD pipeline, auto-scaling |
+| **Phase 5** | Platform Features | §12, §13, §14 | WebSocket channels, AI Chat Agent (LangGraph multi-agent), Power BI embed + menu system |
+| **Phase 6** | Frontend | §16, §17 | React app shell, permission-aware UI, full integration with all APIs and WebSockets |
+
+> **Phase dependencies:** Phase 2 requires Phase 1's auth service. Phase 5's WebSocket auth reuses the JWT middleware from Phase 3. Phase 5's AI Agent uses the Service Bus from Phase 4. Phase 6 requires all previous phases to be complete.
+
 
 ---
 
@@ -130,6 +193,49 @@ Azure Front Door ─── Resolves custom domain ──► Tenant Routing
         ├─► Rate Limiting (Redis-backed)
         └─► Route to Microservice
 ```
+
+
+
+### 2.3 Platform Feature Communication Channels
+
+The base REST API architecture is extended by three additional communication channels. These are covered in depth in Part V and Part VI.
+
+```
+Browser / Client
+  │
+  ├── HTTPS REST ─────────────────► REST API Gateway (Container App)
+  │                                       │
+  │                                  [MW-1 → MW-9 Middleware Pipeline]
+  │                                       │
+  │                                  Route Handlers → Services → DB / Redis / Service Bus
+  │
+  ├── WSS WebSocket ────────────── WebSocket Gateway (same Container App)
+  │   /ws/v1/notifications               │
+  │   /ws/v1/chat                        ├── Notification Service  (server → client push)
+  │                                      └── Chat Channel → AI Agent Service
+  │                                                │
+  │                                      LangGraph Orchestrator
+  │                                      ├── Intent Classifier (LLM)
+  │                                      ├── SQL Agent (tenant-scoped read queries)
+  │                                      ├── BI Insights Agent (Power BI dataset)
+  │                                      └── Response Synthesizer (LLM streaming)
+  │
+  └── Power BI <iframe> ──────────► app.powerbi.com  (Microsoft CDN)
+      embed token provided by             Token obtained via:
+      backend API call                    GET /api/v1/powerbi/reports/{id}/embed-token
+                                          Backend → Power BI Embed API → embed_url + token
+                                          Token is user-scoped (optional Power BI RLS applied)
+```
+
+**Channel summary:**
+
+| Channel | Protocol | Auth Mechanism | Direction | Primary Use |
+|---------|----------|---------------|-----------|-------------|
+| REST API | HTTPS | `Authorization: Bearer <jwt>` header | Request / Response | All CRUD, menus, Power BI token APIs |
+| WS Notifications | WSS | JWT in `?token=` query param | Server → Client | Alerts, permission changes, report-ready events |
+| WS Chat | WSS | JWT in `?token=` query param | Bidirectional | AI assistant queries and streaming responses |
+| Power BI Embed | HTTPS iframe | Short-lived embed token | Client → powerbi.com | Embedded analytics report rendering |
+
 
 ---
 
@@ -218,9 +324,82 @@ AS RETURN
 
 ---
 
-## 4. Database Design
+---
 
-### 4.1 Complete Entity Relationship Model
+## PART II — SECURITY & DATA FOUNDATION
+
+*Security controls and the complete data model are foundational — every feature in the platform is built on top of them. Security is presented before implementation details to establish the zero-trust design philosophy early. The database schema follows immediately as the single source of truth for all platform entities. All feature-specific tables (notifications, chat, menu, Power BI) are indexed here and fully defined in their respective feature sections.*
+
+---
+
+## 4. Security Architecture
+
+### 4.1 Security Controls Matrix
+
+| Layer | Control | Implementation |
+|-------|---------|---------------|
+| **Network** | VNET isolation | All services in Azure VNET; DB and Redis on private endpoints |
+| **Network** | WAF | Azure Front Door WAF with OWASP Core Rule Set 3.2 |
+| **Network** | DDoS | Azure DDoS Protection Standard |
+| **Transport** | TLS 1.3 | End-to-end encryption; TLS termination at Front Door |
+| **Authentication** | JWT RS256 | Asymmetric signing; public key rotation via JWKS endpoint |
+| **Authentication** | MFA | TOTP-based; enforced per tenant policy |
+| **Authentication** | Brute Force Protection | Account lockout after 5 failed attempts (30-min cooldown) |
+| **Authorization** | RBAC | Granular permission engine with explicit deny |
+| **Authorization** | SQL RLS | Row-Level Security on all tenant-scoped tables |
+| **Data** | Encryption at Rest | Azure SQL TDE + Azure Storage SSE |
+| **Data** | Encryption in Transit | TLS 1.3 everywhere |
+| **Data** | Secret Management | Azure Key Vault; never store secrets in config/code |
+| **Data** | Password Hashing | Argon2id (memory-hard) with per-user salt |
+| **API** | Rate Limiting | Redis sliding window; per-tenant + per-user + per-endpoint |
+| **API** | Input Validation | Pydantic schemas with strict validation |
+| **API** | CORS | Per-tenant allowed origins |
+| **API** | CSRF | SameSite=Strict cookies + CSRF token for form auth |
+| **Frontend** | XSS Prevention | React auto-escaping + CSP headers |
+| **Frontend** | Token Storage | Access token in memory; refresh token in HttpOnly cookie |
+| **Audit** | Logging | All state-changing operations logged with before/after snapshots |
+| **Audit** | Login History | All login attempts (success + failure) recorded with IP + UA |
+| **Compliance** | Data Residency | Azure region selection per tenant (configurable) |
+
+### 4.2 CORS Configuration (Per-Tenant)
+
+```python
+# Dynamic CORS based on tenant domains
+@app.middleware("http")
+async def cors_middleware(request: Request, call_next):
+    origin = request.headers.get("origin")
+    tenant = await resolve_tenant_from_origin(origin)
+
+    if tenant and origin in tenant.allowed_origins:
+        response = await call_next(request)
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,DELETE,PATCH"
+        response.headers["Access-Control-Allow-Headers"] = "Authorization,Content-Type,X-Tenant-ID"
+        return response
+
+    return await call_next(request)
+```
+
+### 4.3 Content Security Policy
+
+```
+Content-Security-Policy:
+  default-src 'self';
+  script-src 'self';
+  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+  font-src 'self' https://fonts.gstatic.com;
+  img-src 'self' data: https://cdn.vesper.com https://*.blob.core.windows.net;
+  connect-src 'self' https://*.vesper-api.com https://login.microsoftonline.com;
+  frame-ancestors 'none';
+  base-uri 'self';
+```
+
+---
+
+## 5. Database Design
+
+### 5.1 Complete Entity Relationship Model
 
 The database is organized into five logical domains:
 
@@ -297,9 +476,9 @@ The database is organized into five logical domains:
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 4.2 Complete Table Definitions
+### 5.2 Complete Table Definitions
 
-#### 4.2.1 Tenant Management Domain
+#### 5.2.1 Tenant Management Domain
 
 ```sql
 -- ═══════════════════════════════════════════════════════════════
@@ -367,7 +546,7 @@ CREATE TABLE tenant_themes (
 );
 ```
 
-#### 4.2.2 User Management Domain
+#### 5.2.2 User Management Domain
 
 ```sql
 -- ═══════════════════════════════════════════════════════════════
@@ -432,7 +611,7 @@ CREATE TABLE user_group_map (
 );
 ```
 
-#### 4.2.3 RBAC / Permission Domain (Core Design)
+#### 5.2.3 RBAC / Permission Domain (Core Design)
 
 ```sql
 -- ═══════════════════════════════════════════════════════════════
@@ -538,7 +717,7 @@ CREATE TABLE group_role_map (
 );
 ```
 
-#### 4.2.4 Permission Resolution Logic
+#### 5.2.4 Permission Resolution Logic
 
 The effective permissions for a user are computed by merging direct and group-inherited permissions:
 
@@ -583,7 +762,7 @@ The effective permissions for a user are computed by merging direct and group-in
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
-#### 4.2.5 Identity Federation Domain (Microsoft Entra ID)
+#### 5.2.5 Identity Federation Domain (Microsoft Entra ID)
 
 ```sql
 -- ═══════════════════════════════════════════════════════════════
@@ -650,7 +829,7 @@ CREATE TABLE sync_audit_log (
 );
 ```
 
-#### 4.2.6 Audit & System Domain
+#### 5.2.6 Audit & System Domain
 
 ```sql
 -- ═══════════════════════════════════════════════════════════════
@@ -701,7 +880,7 @@ CREATE TABLE sessions (
 );
 ```
 
-### 4.3 Key Database Indexes for Performance
+### 5.3 Key Database Indexes for Performance
 
 ```sql
 -- High-frequency permission resolution query
@@ -722,9 +901,36 @@ CREATE INDEX ix_users_tenant ON users(tenant_id) INCLUDE (status);
 
 ---
 
-## 5. User Management & RBAC System
 
-### 5.1 User Hierarchy
+### 5.4 Feature Domain Tables
+
+The following feature-specific tables belong to the same single database and follow identical tenant isolation patterns (`tenant_id` FK + SQL RLS). Their full SQL `CREATE TABLE` definitions are kept in the feature sections that introduce them — this keeps schema definitions co-located with their architectural context.
+
+| Domain | Tables | Full Schema Defined In |
+|--------|--------|----------------------|
+| **Menu & Navigation** | `menu_items` | Section 14.2 |
+| **Power BI Reporting** | `powerbi_reports`, `powerbi_tenant_config`, `powerbi_embed_tokens` | Section 14.2 |
+| **Real-Time Notifications** | `notifications` | Section 12.4 |
+| **AI Chat** | `chat_sessions`, `chat_messages`, `chat_agent_tools` | Section 13.2 |
+
+> **Isolation guarantee:** All feature tables carry `tenant_id UNIQUEIDENTIFIER NOT NULL REFERENCES tenants(id)` and are covered by the same SQL Row-Level Security policy from Section 5.1. The `resource_key` column on `menu_items` directly references the `resources` table (Section 5.2.3), making RBAC the single control plane for both API access and UI menu visibility — no separate menu permission configuration is needed.
+
+---
+
+## PART III — USER MANAGEMENT & ACCESS CONTROL
+
+*This part covers the user lifecycle, the RBAC permission model, and all authentication flows. Read these two sections before the backend implementation — every API request in the platform flows through the permission system described here, and the middleware pipeline (Part IV) builds directly on the auth model defined here.*
+
+---
+
+## 6. User Management & RBAC System
+
+> **Resource keys — single permission gate for APIs and menus.** Every `resource_key` registered in the `resources` table serves two simultaneous purposes:
+> 1. **API-level enforcement:** Endpoints decorated with `@require_permission(resource_key, action)` check this key against the user's permission matrix before the handler runs.
+> 2. **Menu-level visibility:** Each `menu_items` record (Section 14) carries a `resource_key`. The `MenuService` filters the navigation tree by checking `view` permission on each item's key before returning the menu to the client. A single role permission change therefore propagates automatically to both API access and sidebar visibility — no separate menu configuration needed.
+
+### 6.1 User Hierarchy
+
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -758,7 +964,7 @@ CREATE INDEX ix_users_tenant ON users(tenant_id) INCLUDE (status);
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 5.2 Permission Assignment Flow
+### 6.2 Permission Assignment Flow
 
 ```
     ┌─────────┐         ┌─────────────┐         ┌──────────┐
@@ -786,7 +992,7 @@ CREATE INDEX ix_users_tenant ON users(tenant_id) INCLUDE (status);
                                   minus any explicit DENY grants
 ```
 
-### 5.3 Permission Granularity Levels
+### 6.3 Permission Granularity Levels
 
 The system supports **three levels of UI permission granularity**, all configurable per role:
 
@@ -809,9 +1015,9 @@ The system supports **three levels of UI permission granularity**, all configura
 | `reports.share_button` | widget | view | allow | deny | allow |
 | `reports.bulk_actions` | widget | view | deny | deny | allow |
 
-### 5.4 User Provisioning Workflows
+### 6.4 User Provisioning Workflows
 
-#### 5.4.1 Manual User Creation (Form Auth)
+#### 6.4.1 Manual User Creation (Form Auth)
 
 ```
 Tenant Admin
@@ -834,7 +1040,7 @@ User clicks activation link
     └── Audit log: 'user.activated'
 ```
 
-#### 5.4.2 Entra ID Auto-Provisioning (JIT)
+#### 6.4.2 Entra ID Auto-Provisioning (JIT)
 
 ```
 User logs in via Microsoft Entra
@@ -863,7 +1069,7 @@ OIDC Callback → /api/v1/auth/entra/callback
 Issue JWT tokens (access + refresh)
 ```
 
-#### 5.4.3 Entra Group Sync (Background Job)
+#### 6.4.3 Entra Group Sync (Background Job)
 
 ```
 Scheduled Job (every N minutes per tenant)
@@ -891,9 +1097,9 @@ For each entra_group_mapping in tenant:
 
 ---
 
-## 6. Authentication & Identity
+## 7. Authentication & Identity
 
-### 6.1 Authentication Architecture
+### 7.1 Authentication Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -936,7 +1142,7 @@ For each entra_group_mapping in tenant:
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 6.2 JWT Token Structure
+### 7.2 JWT Token Structure
 
 ```json
 // Access Token (short-lived, 15 min)
@@ -959,7 +1165,7 @@ For each entra_group_mapping in tenant:
 // Refresh Token: opaque, stored hashed in sessions table
 ```
 
-### 6.3 API Authentication Middleware Pipeline
+### 7.3 API Authentication Middleware Pipeline
 
 ```
 Incoming Request
@@ -989,9 +1195,17 @@ Incoming Request
 
 ---
 
-## 7. Backend Architecture (FastAPI)
+---
 
-### 7.1 Project Structure
+## PART IV — BACKEND IMPLEMENTATION
+
+*This part covers the FastAPI backend in four sequential sections that should be read in order: project structure and conventions (§8), API request/response standards (§9), the nine-layer middleware security pipeline (§10), and the caching and messaging infrastructure (§11). API standards are placed before middleware because understanding what a valid request looks like is a prerequisite for understanding how requests are validated.*
+
+---
+
+## 8. Backend Architecture (FastAPI)
+
+### 8.1 Project Structure
 
 ```
 vesper-backend/
@@ -1106,7 +1320,7 @@ vesper-backend/
 └── .env.example
 ```
 
-### 7.2 API Versioning Strategy
+### 8.2 API Versioning Strategy
 
 ```python
 # app/main.py
@@ -1133,7 +1347,7 @@ def create_app() -> FastAPI:
 - Deprecated endpoints → `Sunset` header + 6-month deprecation window
 - Version discovery → `GET /api/versions` returns available versions
 
-### 7.3 Core Permission Engine (Backend)
+### 8.3 Core Permission Engine (Backend)
 
 ```python
 # app/core/permissions.py
@@ -1224,7 +1438,7 @@ class PermissionEngine:
             await self.invalidate_user_cache(uid, tenant_id)
 ```
 
-### 7.4 Permission Decorator for Endpoints
+### 8.4 Permission Decorator for Endpoints
 
 ```python
 # app/api/deps.py
@@ -1275,7 +1489,7 @@ async def delete_user(id: str, request: Request):
     ...
 ```
 
-### 7.5 Key API Endpoints
+### 8.5 Key API Endpoints
 
 #### Authentication & Identity
 
@@ -1346,7 +1560,7 @@ async def delete_user(id: str, request: Request):
 | `POST` | `/api/v1/entra/sync` | Trigger manual sync |
 | `GET` | `/api/v1/entra/sync/status` | Get last sync status |
 
-### 7.6 Rate Limiting Strategy
+### 8.6 Rate Limiting Strategy
 
 ```python
 # Redis-backed rate limiting per tenant + per user
@@ -1365,736 +1579,9 @@ RATE_LIMITS = {
 
 ---
 
-## 8. Frontend Architecture (React)
+## 9. API Design & Versioning
 
-### 8.1 Project Structure
-
-```
-vesper-frontend/
-├── public/
-│   └── index.html
-├── src/
-│   ├── index.tsx
-│   ├── App.tsx                         # Root: TenantProvider → ThemeProvider → Router
-│   │
-│   ├── config/
-│   │   ├── api.ts                      # Axios instance, interceptors, base URLs
-│   │   ├── routes.ts                   # Route definitions with permission keys
-│   │   └── constants.ts
-│   │
-│   ├── providers/                      # React Context Providers
-│   │   ├── TenantProvider.tsx          # Resolves tenant, loads config
-│   │   ├── AuthProvider.tsx            # Auth state, tokens, login/logout
-│   │   ├── PermissionProvider.tsx      # Permission matrix context
-│   │   └── ThemeProvider.tsx           # Dynamic theming per tenant
-│   │
-│   ├── hooks/                          # Custom Hooks
-│   │   ├── useAuth.ts                  # Login, logout, token refresh
-│   │   ├── usePermission.ts           # Permission checks for components
-│   │   ├── useTenant.ts               # Tenant config access
-│   │   └── useApi.ts                   # API call wrapper with error handling
-│   │
-│   ├── components/                     # Shared Components
-│   │   ├── ui/                         # Design system primitives
-│   │   │   ├── Button.tsx
-│   │   │   ├── Card.tsx
-│   │   │   ├── DataTable.tsx
-│   │   │   ├── Modal.tsx
-│   │   │   └── ...
-│   │   │
-│   │   ├── auth/
-│   │   │   ├── LoginForm.tsx           # Form-based login
-│   │   │   ├── EntraLoginButton.tsx    # Microsoft SSO button
-│   │   │   ├── MfaVerification.tsx
-│   │   │   └── ProtectedRoute.tsx      # Route guard with permission check
-│   │   │
-│   │   ├── permissions/
-│   │   │   ├── PermissionGate.tsx      # Conditionally render children
-│   │   │   ├── PermissionMatrix.tsx    # Admin: visual permission editor
-│   │   │   └── RolePermissionEditor.tsx
-│   │   │
-│   │   ├── layout/
-│   │   │   ├── AppShell.tsx            # Main layout (sidebar + header + content)
-│   │   │   ├── Sidebar.tsx             # Permission-aware navigation
-│   │   │   ├── Header.tsx
-│   │   │   └── Breadcrumb.tsx
-│   │   │
-│   │   └── admin/
-│   │       ├── UserManagement.tsx
-│   │       ├── GroupManagement.tsx
-│   │       ├── RoleManagement.tsx
-│   │       ├── TenantSettings.tsx
-│   │       └── EntraConfig.tsx
-│   │
-│   ├── pages/                          # Page-level components
-│   │   ├── Dashboard.tsx
-│   │   ├── Reports.tsx
-│   │   ├── UserAdmin.tsx
-│   │   ├── Settings.tsx
-│   │   └── ...
-│   │
-│   ├── services/                       # API service layer
-│   │   ├── authService.ts
-│   │   ├── userService.ts
-│   │   ├── roleService.ts
-│   │   ├── tenantService.ts
-│   │   └── permissionService.ts
-│   │
-│   ├── themes/                         # Theme infrastructure
-│   │   ├── base.ts                     # Base design tokens
-│   │   ├── generateTheme.ts           # Dynamic theme from tenant config
-│   │   └── overrides.ts               # Component-level style overrides
-│   │
-│   ├── types/                          # TypeScript types
-│   │   ├── auth.ts
-│   │   ├── user.ts
-│   │   ├── permission.ts
-│   │   ├── tenant.ts
-│   │   └── api.ts
-│   │
-│   └── utils/
-│       ├── permissions.ts              # Permission helper functions
-│       ├── storage.ts                  # Secure token storage
-│       └── errorHandler.ts
-│
-├── package.json
-├── tsconfig.json
-├── vite.config.ts
-└── .env.example
-```
-
-### 8.2 Permission-Driven UI System
-
-#### 8.2.1 PermissionGate Component
-
-The core building block for permission-controlled UI:
-
-```tsx
-// src/components/permissions/PermissionGate.tsx
-
-interface PermissionGateProps {
-  resource: string;             // e.g. 'reports.export_button'
-  action?: string;              // defaults to 'view'
-  fallback?: React.ReactNode;   // What to render if denied (null = hidden)
-  children: React.ReactNode;
-}
-
-const PermissionGate: React.FC<PermissionGateProps> = ({
-  resource,
-  action = 'view',
-  fallback = null,
-  children,
-}) => {
-  const { hasPermission } = usePermission();
-
-  if (!hasPermission(resource, action)) {
-    return <>{fallback}</>;
-  }
-
-  return <>{children}</>;
-};
-
-// Usage examples:
-
-// Page-level: hide entire page
-<PermissionGate resource="reports">
-  <ReportsPage />
-</PermissionGate>
-
-// Section-level: hide a card/panel
-<PermissionGate resource="dashboard.revenue_chart">
-  <RevenueChartCard data={revenueData} />
-</PermissionGate>
-
-// Action-level: hide specific buttons
-<PermissionGate resource="reports.export_button">
-  <Button onClick={handleExport}>Export PDF</Button>
-</PermissionGate>
-
-// With fallback (disabled state instead of hidden)
-<PermissionGate
-  resource="users"
-  action="delete"
-  fallback={<Button disabled>Delete (No Permission)</Button>}
->
-  <Button onClick={handleDelete} variant="danger">Delete User</Button>
-</PermissionGate>
-```
-
-#### 8.2.2 Permission-Aware Navigation
-
-```tsx
-// src/components/layout/Sidebar.tsx
-
-const navigationItems = [
-  {
-    label: 'Dashboard',
-    icon: DashboardIcon,
-    path: '/dashboard',
-    resource: 'dashboard',                    // Permission key
-  },
-  {
-    label: 'Reports',
-    icon: ReportsIcon,
-    path: '/reports',
-    resource: 'reports',
-    children: [
-      { label: 'Sales', path: '/reports/sales', resource: 'reports.sales' },
-      { label: 'Analytics', path: '/reports/analytics', resource: 'reports.analytics' },
-    ],
-  },
-  {
-    label: 'User Management',
-    icon: UsersIcon,
-    path: '/admin/users',
-    resource: 'admin.users',
-  },
-];
-
-const Sidebar = () => {
-  const { hasPermission } = usePermission();
-
-  // Filter navigation items based on permissions
-  const visibleItems = navigationItems.filter(item =>
-    hasPermission(item.resource, 'view')
-  );
-
-  return (
-    <nav>
-      {visibleItems.map(item => (
-        <NavItem key={item.path} {...item}>
-          {item.children?.filter(child =>
-            hasPermission(child.resource, 'view')
-          ).map(child => (
-            <NavItem key={child.path} {...child} />
-          ))}
-        </NavItem>
-      ))}
-    </nav>
-  );
-};
-```
-
-#### 8.2.3 Protected Route System
-
-```tsx
-// src/components/auth/ProtectedRoute.tsx
-
-interface ProtectedRouteProps {
-  resource: string;
-  action?: string;
-  children: React.ReactElement;
-}
-
-const ProtectedRoute = ({ resource, action = 'view', children }: ProtectedRouteProps) => {
-  const { isAuthenticated } = useAuth();
-  const { hasPermission, isLoading } = usePermission();
-
-  if (!isAuthenticated) return <Navigate to="/login" />;
-  if (isLoading) return <PageSkeleton />;
-  if (!hasPermission(resource, action)) return <AccessDenied />;
-
-  return children;
-};
-
-// Route configuration
-// src/config/routes.ts
-const routes = [
-  { path: '/dashboard',      element: <Dashboard />,      resource: 'dashboard' },
-  { path: '/reports',        element: <Reports />,        resource: 'reports' },
-  { path: '/admin/users',    element: <UserAdmin />,      resource: 'admin.users' },
-  { path: '/admin/roles',    element: <RoleAdmin />,      resource: 'admin.roles' },
-  { path: '/admin/groups',   element: <GroupAdmin />,      resource: 'admin.groups' },
-  { path: '/settings',       element: <Settings />,       resource: 'settings' },
-];
-
-// App.tsx
-<Routes>
-  {routes.map(({ path, element, resource }) => (
-    <Route
-      key={path}
-      path={path}
-      element={<ProtectedRoute resource={resource}>{element}</ProtectedRoute>}
-    />
-  ))}
-</Routes>
-```
-
-### 8.3 Multi-Tenant Theming System
-
-```tsx
-// src/providers/ThemeProvider.tsx
-
-const ThemeProvider = ({ children }: { children: React.ReactNode }) => {
-  const { tenantConfig } = useTenant();
-
-  // Generate MUI/CSS theme from tenant configuration
-  const theme = useMemo(() => {
-    const base = createBaseTheme();
-
-    return deepMerge(base, {
-      palette: {
-        primary: { main: tenantConfig.branding.primary_color },
-        secondary: { main: tenantConfig.branding.secondary_color },
-        accent: { main: tenantConfig.branding.accent_color },
-      },
-      typography: {
-        fontFamily: tenantConfig.branding.font_family,
-      },
-      // Component-level overrides from tenant config
-      components: tenantConfig.branding.component_overrides
-        ? JSON.parse(tenantConfig.branding.component_overrides)
-        : {},
-    });
-  }, [tenantConfig]);
-
-  return (
-    <MuiThemeProvider theme={theme}>
-      {/* Inject tenant custom CSS */}
-      {tenantConfig.branding.custom_css && (
-        <style>{tenantConfig.branding.custom_css}</style>
-      )}
-      {children}
-    </MuiThemeProvider>
-  );
-};
-```
-
-### 8.4 Tenant-Specific Component Customization
-
-```tsx
-// Tenant-specific component overrides without code changes
-// Stored in tenant_themes.component_overrides (JSON)
-
-{
-  "DataTable": {
-    "density": "comfortable",           // compact | standard | comfortable
-    "stripedRows": true,
-    "showColumnFilters": true
-  },
-  "Sidebar": {
-    "variant": "collapsed",             // expanded | collapsed | mini
-    "position": "left"
-  },
-  "LoginPage": {
-    "layout": "split",                  // centered | split | fullscreen
-    "showSocialLogin": true,
-    "customWelcomeText": "Welcome to Acme Analytics"
-  },
-  "Header": {
-    "showBreadcrumbs": true,
-    "showNotifications": true,
-    "showUserAvatar": true
-  }
-}
-
-// Components read these overrides:
-const DataTable = ({ data, columns }) => {
-  const { getComponentConfig } = useTenant();
-  const config = getComponentConfig('DataTable');
-
-  return (
-    <MuiDataGrid
-      rows={data}
-      columns={columns}
-      density={config.density ?? 'standard'}
-      // ...
-    />
-  );
-};
-```
-
-### 8.5 Permission Matrix Admin UI
-
-The Tenant Admin sees a visual permission editor:
-
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│  ROLE: Analyst                                              [Save] [×]  │
-├──────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  Resource                    │ View │ Create │ Edit │ Delete │ Export   │
-│  ═══════════════════════════╪══════╪════════╪══════╪════════╪════════  │
-│  ▼ Dashboard                │  ☑   │   -    │  -   │   -    │   -     │
-│    ├─ Revenue Chart         │  ☑   │   -    │  -   │   -    │   -     │
-│    ├─ User Stats Widget     │  ☑   │   -    │  -   │   -    │   -     │
-│    └─ Export Button          │  ☐   │   -    │  -   │   -    │   -     │
-│  ▼ Reports                  │  ☑   │   ☑   │  ☐   │   ☐    │   ☑    │
-│    ├─ Filters Panel         │  ☑   │   -    │  -   │   -    │   -     │
-│    ├─ Data Grid             │  ☑   │   -    │  ☐   │   -    │   -     │
-│    ├─ Share Button           │  ☑   │   -    │  -   │   -    │   -     │
-│    └─ Delete Button          │  ☐   │   -    │  -   │   -    │   -     │
-│  ▼ User Management          │  ☑   │   ☐   │  ☐   │   ☐    │   ☐    │
-│    ├─ Create Button          │  ☐   │   -    │  -   │   -    │   -     │
-│    ├─ Bulk Import            │  ☐   │   -    │  -   │   -    │   -     │
-│    └─ Role Assignment        │  ☐   │   -    │  -   │   -    │   -     │
-│  ▼ Settings                 │  ☐   │   -    │  ☐   │   -    │   -     │
-│                                                                         │
-│  ☑ = Allowed    ☐ = Denied    - = Not applicable for this resource     │
-└──────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 9. Caching, Messaging & Broker Architecture
-
-### 9.1 Redis Caching Strategy
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         REDIS CACHE LAYERS                                  │
-│                                                                            │
-│  Layer 1: Session Cache                                                    │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ Key: session:{session_id}                                           │   │
-│  │ Value: { user_id, tenant_id, roles, revoked }                      │   │
-│  │ TTL: 15 minutes (matches access token)                             │   │
-│  │ Purpose: Fast session validation without DB hit                    │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                            │
-│  Layer 2: Permission Cache                                                 │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ Key: perm_matrix:{tenant_id}:{user_id}                             │   │
-│  │ Value: { full permission matrix JSON }                             │   │
-│  │ TTL: 5 minutes                                                     │   │
-│  │ Invalidation: On role/group/permission change                      │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                            │
-│  Layer 3: Tenant Config Cache                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ Key: tenant_config:{domain}                                        │   │
-│  │ Value: { full tenant config + theme + branding }                   │   │
-│  │ TTL: 10 minutes                                                    │   │
-│  │ Invalidation: On tenant config update                              │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                            │
-│  Layer 4: Rate Limiting                                                    │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ Key: rate:{tenant_id}:{user_id}:{endpoint}                        │   │
-│  │ Structure: Sorted set (sliding window)                             │   │
-│  │ TTL: Auto-expire with window                                       │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                            │
-│  Layer 5: API Response Cache                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ Key: api_cache:{tenant_id}:{endpoint_hash}:{params_hash}          │   │
-│  │ TTL: Varies by endpoint (30s - 5min)                               │   │
-│  │ Purpose: Expensive queries (reports, analytics aggregations)       │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                            │
-│  Azure Service: Azure Cache for Redis (Premium tier, 6GB, cluster)        │
-│                                                                            │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### 9.2 Message Broker Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     EVENT-DRIVEN ARCHITECTURE                               │
-│                                                                            │
-│  Broker: Azure Service Bus (SaaS) or RabbitMQ on Container Apps (IaaS)    │
-│                                                                            │
-│  ┌────────────────────────────────────────────────────────────────────┐     │
-│  │                         TOPICS / QUEUES                            │     │
-│  │                                                                    │     │
-│  │  ┌──────────────────────┐  Producers:     Consumers:              │     │
-│  │  │  user.events         │  Auth Service → Notification Service    │     │
-│  │  │  • user.created      │                 Audit Worker            │     │
-│  │  │  • user.updated      │                 Entra Sync Worker       │     │
-│  │  │  • user.deactivated  │                 Analytics Engine        │     │
-│  │  │  • user.login        │                                        │     │
-│  │  └──────────────────────┘                                        │     │
-│  │                                                                    │     │
-│  │  ┌──────────────────────┐  Producers:     Consumers:              │     │
-│  │  │  tenant.events       │  Tenant Mgmt → Provisioning Worker     │     │
-│  │  │  • tenant.created    │                 DNS Config Worker       │     │
-│  │  │  • tenant.suspended  │                 Notification Service    │     │
-│  │  │  • tenant.config_upd │                 Cache Invalidation     │     │
-│  │  └──────────────────────┘                                        │     │
-│  │                                                                    │     │
-│  │  ┌──────────────────────┐  Producers:     Consumers:              │     │
-│  │  │  permission.events   │  RBAC Service → Cache Invalidation     │     │
-│  │  │  • role.updated      │                 Audit Worker            │     │
-│  │  │  • perm.assigned     │                 WebSocket Notifier      │     │
-│  │  │  • group.membership  │                 (push to frontend)      │     │
-│  │  └──────────────────────┘                                        │     │
-│  │                                                                    │     │
-│  │  ┌──────────────────────┐  Producers:     Consumers:              │     │
-│  │  │  audit.events        │  All Services → Audit Writer            │     │
-│  │  │  • action.performed  │                 (bulk insert to SQL)    │     │
-│  │  └──────────────────────┘                                        │     │
-│  │                                                                    │     │
-│  │  ┌──────────────────────┐  Producers:     Consumers:              │     │
-│  │  │  entra.sync          │  Scheduler   → Entra Sync Worker       │     │
-│  │  │  • sync.requested    │                                        │     │
-│  │  │  • sync.completed    │                                        │     │
-│  │  └──────────────────────┘                                        │     │
-│  │                                                                    │     │
-│  └────────────────────────────────────────────────────────────────────┘     │
-│                                                                            │
-│  Benefits:                                                                 │
-│  • Decoupled services: auth doesn't wait for audit writes                 │
-│  • Resilience: if notification service is down, events queue up           │
-│  • Scale independently: audit writer can batch-process                    │
-│  • Cross-service communication without direct API coupling                │
-│                                                                            │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### 9.3 Inter-Service Communication Pattern
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│              MICROSERVICE COMMUNICATION PATTERNS                            │
-│                                                                            │
-│  Synchronous (HTTP/gRPC):                                                  │
-│  ┌──────────────────────────────────────────────────────────────────┐      │
-│  │ • API Gateway → Auth Service (token validation)                  │      │
-│  │ • API Gateway → Core API (business logic)                       │      │
-│  │ • Core API → User Mgmt Service (user lookups)                   │      │
-│  │ • Tenant Mgmt → Entra Service (OIDC verification)               │      │
-│  │                                                                  │      │
-│  │ Pattern: Service mesh via Azure Container Apps internal DNS      │      │
-│  │ Format: REST (JSON) for simplicity, gRPC for high-throughput    │      │
-│  └──────────────────────────────────────────────────────────────────┘      │
-│                                                                            │
-│  Asynchronous (Message Broker):                                            │
-│  ┌──────────────────────────────────────────────────────────────────┐      │
-│  │ • Audit logging (fire-and-forget)                                │      │
-│  │ • Email/notification dispatch                                    │      │
-│  │ • Entra group sync (scheduled + on-demand)                      │      │
-│  │ • Cache invalidation broadcasts                                  │      │
-│  │ • Analytics event ingestion                                     │      │
-│  │                                                                  │      │
-│  │ Pattern: Pub/Sub topics with durable subscriptions              │      │
-│  │ Dead letter: Failed messages → DLQ for investigation            │      │
-│  └──────────────────────────────────────────────────────────────────┘      │
-│                                                                            │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 10. Security Architecture
-
-### 10.1 Security Controls Matrix
-
-| Layer | Control | Implementation |
-|-------|---------|---------------|
-| **Network** | VNET isolation | All services in Azure VNET; DB and Redis on private endpoints |
-| **Network** | WAF | Azure Front Door WAF with OWASP Core Rule Set 3.2 |
-| **Network** | DDoS | Azure DDoS Protection Standard |
-| **Transport** | TLS 1.3 | End-to-end encryption; TLS termination at Front Door |
-| **Authentication** | JWT RS256 | Asymmetric signing; public key rotation via JWKS endpoint |
-| **Authentication** | MFA | TOTP-based; enforced per tenant policy |
-| **Authentication** | Brute Force Protection | Account lockout after 5 failed attempts (30-min cooldown) |
-| **Authorization** | RBAC | Granular permission engine with explicit deny |
-| **Authorization** | SQL RLS | Row-Level Security on all tenant-scoped tables |
-| **Data** | Encryption at Rest | Azure SQL TDE + Azure Storage SSE |
-| **Data** | Encryption in Transit | TLS 1.3 everywhere |
-| **Data** | Secret Management | Azure Key Vault; never store secrets in config/code |
-| **Data** | Password Hashing | Argon2id (memory-hard) with per-user salt |
-| **API** | Rate Limiting | Redis sliding window; per-tenant + per-user + per-endpoint |
-| **API** | Input Validation | Pydantic schemas with strict validation |
-| **API** | CORS | Per-tenant allowed origins |
-| **API** | CSRF | SameSite=Strict cookies + CSRF token for form auth |
-| **Frontend** | XSS Prevention | React auto-escaping + CSP headers |
-| **Frontend** | Token Storage | Access token in memory; refresh token in HttpOnly cookie |
-| **Audit** | Logging | All state-changing operations logged with before/after snapshots |
-| **Audit** | Login History | All login attempts (success + failure) recorded with IP + UA |
-| **Compliance** | Data Residency | Azure region selection per tenant (configurable) |
-
-### 10.2 CORS Configuration (Per-Tenant)
-
-```python
-# Dynamic CORS based on tenant domains
-@app.middleware("http")
-async def cors_middleware(request: Request, call_next):
-    origin = request.headers.get("origin")
-    tenant = await resolve_tenant_from_origin(origin)
-
-    if tenant and origin in tenant.allowed_origins:
-        response = await call_next(request)
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,DELETE,PATCH"
-        response.headers["Access-Control-Allow-Headers"] = "Authorization,Content-Type,X-Tenant-ID"
-        return response
-
-    return await call_next(request)
-```
-
-### 10.3 Content Security Policy
-
-```
-Content-Security-Policy:
-  default-src 'self';
-  script-src 'self';
-  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
-  font-src 'self' https://fonts.gstatic.com;
-  img-src 'self' data: https://cdn.vesper.com https://*.blob.core.windows.net;
-  connect-src 'self' https://*.vesper-api.com https://login.microsoftonline.com;
-  frame-ancestors 'none';
-  base-uri 'self';
-```
-
----
-
-## 11. Azure Deployment & Infrastructure
-
-### 11.1 Infrastructure Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    AZURE INFRASTRUCTURE TOPOLOGY                            │
-│                                                                            │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  Resource Group: rg-vesper-production                               │   │
-│  │                                                                     │   │
-│  │  ┌───────────────────────────────────────────────────────────────┐  │   │
-│  │  │  Azure Front Door (Premium)                                   │  │   │
-│  │  │  • Custom domains (*.vesper.com + tenant custom domains)     │  │   │
-│  │  │  • SSL certificate management (auto-provisioning)            │  │   │
-│  │  │  • WAF policy (OWASP 3.2 + custom rules)                   │  │   │
-│  │  │  • Global load balancing                                     │  │   │
-│  │  │  • Caching for static assets                                 │  │   │
-│  │  └───────────────┬─────────────────────┬─────────────────────────┘  │   │
-│  │                  │                     │                            │   │
-│  │       ┌──────────▼──────────┐  ┌───────▼───────────────────┐       │   │
-│  │       │ Static Web App      │  │ Container Apps Env        │       │   │
-│  │       │ (React Frontend)    │  │ (VNET-integrated)         │       │   │
-│  │       │                     │  │                           │       │   │
-│  │       │ • Auto CI/CD from   │  │ ┌─────────────────────┐  │       │   │
-│  │       │   GitHub Actions    │  │ │ API Gateway (YARP)  │  │       │   │
-│  │       │ • Global CDN        │  │ │ Scale: 2-20 replicas│  │       │   │
-│  │       │ • Staging slots     │  │ └──────────┬──────────┘  │       │   │
-│  │       └─────────────────────┘  │            │             │       │   │
-│  │                                │ ┌──────────▼──────────┐  │       │   │
-│  │                                │ │ Auth Service        │  │       │   │
-│  │                                │ │ Scale: 2-10 replicas│  │       │   │
-│  │                                │ └─────────────────────┘  │       │   │
-│  │                                │ ┌─────────────────────┐  │       │   │
-│  │                                │ │ Core API Service    │  │       │   │
-│  │                                │ │ Scale: 3-30 replicas│  │       │   │
-│  │                                │ └─────────────────────┘  │       │   │
-│  │                                │ ┌─────────────────────┐  │       │   │
-│  │                                │ │ User Mgmt Service   │  │       │   │
-│  │                                │ │ Scale: 2-15 replicas│  │       │   │
-│  │                                │ └─────────────────────┘  │       │   │
-│  │                                │ ┌─────────────────────┐  │       │   │
-│  │                                │ │ Background Workers  │  │       │   │
-│  │                                │ │ (Entra sync, audit) │  │       │   │
-│  │                                │ │ Scale: 1-5 replicas │  │       │   │
-│  │                                │ └─────────────────────┘  │       │   │
-│  │                                └───────────────────────────┘       │   │
-│  │                                                                    │   │
-│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
-│  │  │  Data Layer (Private Endpoints in VNET)                     │   │   │
-│  │  │                                                             │   │   │
-│  │  │  ┌─────────────────┐  ┌──────────────┐  ┌───────────────┐  │   │   │
-│  │  │  │ Azure SQL DB    │  │ Azure Redis  │  │ Azure Service │  │   │   │
-│  │  │  │ (Business Crit.)│  │ (Premium P1) │  │ Bus (Standard)│  │   │   │
-│  │  │  │                 │  │              │  │               │  │   │   │
-│  │  │  │ • Geo-replicas  │  │ • 6GB cache  │  │ • Topics +    │  │   │   │
-│  │  │  │ • Auto-failover │  │ • Clustering │  │   Subscriptns │  │   │   │
-│  │  │  │ • TDE enabled   │  │ • Persistence│  │ • Dead letter │  │   │   │
-│  │  │  │ • Auditing on   │  │              │  │               │  │   │   │
-│  │  │  └─────────────────┘  └──────────────┘  └───────────────┘  │   │   │
-│  │  └─────────────────────────────────────────────────────────────┘   │   │
-│  │                                                                    │   │
-│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
-│  │  │  Operations                                                 │   │   │
-│  │  │                                                             │   │   │
-│  │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │   │   │
-│  │  │  │ Key Vault    │  │ App Insights │  │ Log Analytics    │  │   │   │
-│  │  │  │ (Secrets)    │  │ (APM)        │  │ Workspace        │  │   │   │
-│  │  │  └──────────────┘  └──────────────┘  └──────────────────┘  │   │   │
-│  │  │                                                             │   │   │
-│  │  │  ┌──────────────┐  ┌──────────────┐                        │   │   │
-│  │  │  │ Container    │  │ Azure DNS    │                        │   │   │
-│  │  │  │ Registry     │  │ Zones        │                        │   │   │
-│  │  │  └──────────────┘  └──────────────┘                        │   │   │
-│  │  └─────────────────────────────────────────────────────────────┘   │   │
-│  │                                                                    │   │
-│  └────────────────────────────────────────────────────────────────────┘   │
-│                                                                            │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### 11.2 Auto-Scaling Configuration
-
-| Service | Min | Max | Scale Trigger | Cooldown |
-|---------|-----|-----|--------------|----------|
-| API Gateway | 2 | 20 | CPU > 70% OR concurrent requests > 100 | 60s |
-| Auth Service | 2 | 10 | CPU > 60% OR request latency P95 > 500ms | 60s |
-| Core API | 3 | 30 | CPU > 70% OR concurrent requests > 200 | 90s |
-| User Mgmt | 2 | 15 | CPU > 70% OR queue depth > 50 | 60s |
-| Workers | 1 | 5 | Queue depth > 100 messages | 120s |
-
-### 11.3 CI/CD Pipeline
-
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        CI/CD PIPELINE                                  │
-│                                                                        │
-│  GitHub Repository                                                     │
-│       │                                                                │
-│       ├──► PR Created / Push to main                                  │
-│       │                                                                │
-│       ▼                                                                │
-│  GitHub Actions Workflow                                               │
-│       │                                                                │
-│       ├── Stage 1: Lint + Type Check                                  │
-│       │   ├── Python: ruff, mypy                                      │
-│       │   └── React: eslint, tsc --noEmit                             │
-│       │                                                                │
-│       ├── Stage 2: Unit Tests                                         │
-│       │   ├── Python: pytest (90%+ coverage)                          │
-│       │   └── React: vitest + testing-library                         │
-│       │                                                                │
-│       ├── Stage 3: Integration Tests                                  │
-│       │   └── Docker Compose with test DB + Redis                     │
-│       │                                                                │
-│       ├── Stage 4: Security Scan                                      │
-│       │   ├── Trivy (container scan)                                  │
-│       │   ├── Bandit (Python security)                                │
-│       │   └── npm audit                                               │
-│       │                                                                │
-│       ├── Stage 5: Build & Push                                       │
-│       │   ├── Docker build → Azure Container Registry                 │
-│       │   └── React build → artifact                                  │
-│       │                                                                │
-│       ├── Stage 6: Deploy to Staging                                  │
-│       │   ├── Alembic migrations (auto)                               │
-│       │   ├── Container Apps revision deploy                          │
-│       │   └── Static Web App staging slot                             │
-│       │                                                                │
-│       ├── Stage 7: Smoke Tests on Staging                             │
-│       │   └── Health checks + critical path E2E                      │
-│       │                                                                │
-│       └── Stage 8: Production Deploy (manual approval gate)           │
-│           ├── Blue/green deployment (Container Apps revisions)        │
-│           ├── Gradual traffic shift (10% → 50% → 100%)               │
-│           └── Auto-rollback on error rate spike                       │
-│                                                                        │
-└────────────────────────────────────────────────────────────────────────┘
-```
-
-### 11.4 Environment Strategy
-
-| Environment | Purpose | Azure SQL | Redis | Infra |
-|------------|---------|-----------|-------|-------|
-| **Local** | Developer machine | Docker SQL Server | Docker Redis | docker-compose |
-| **Dev** | Integration testing | Azure SQL (Basic) | Redis (Basic) | Container Apps (min scale) |
-| **Staging** | Pre-production validation | Azure SQL (Standard) | Redis (Standard) | Container Apps (prod-like) |
-| **Production** | Live traffic | Azure SQL (Business Critical) | Redis (Premium) | Container Apps (auto-scale) |
-
----
-
-## 12. API Design & Versioning
-
-### 12.1 API Design Standards
+### 9.1 API Design Standards
 
 ```
 Standard Response Envelope:
@@ -2144,7 +1631,7 @@ HTTP Status Codes:
   500 - Internal Server Error
 ```
 
-### 12.2 API Versioning Policy
+### 9.2 API Versioning Policy
 
 | Strategy | Implementation |
 |----------|---------------|
@@ -2154,7 +1641,7 @@ HTTP Status Codes:
 | **Sunset Header** | `Sunset: Sat, 01 Jan 2028 00:00:00 GMT` on deprecated endpoints |
 | **Discovery** | `GET /api/versions` returns all available versions and deprecation status |
 
-### 12.3 Pagination, Filtering & Sorting
+### 9.3 Pagination, Filtering & Sorting
 
 ```
 GET /api/v1/users?page=1&per_page=20&sort=-created_at&status=active&search=alice
@@ -2171,151 +1658,11 @@ Query Parameters:
 
 ---
 
-## 13. Appendix: Entity Relationship Diagrams
-
-### 13.1 Complete Permission Resolution - Visual Flow
-
-```
-                            ┌──────────┐
-                            │   USER   │
-                            │  (Alice) │
-                            └────┬─────┘
-                                 │
-                   ┌─────────────┼─────────────┐
-                   │                           │
-            ┌──────▼──────┐             ┌──────▼──────┐
-            │ Direct Role │             │   Groups    │
-            │ Assignment  │             │  Membership │
-            └──────┬──────┘             └──────┬──────┘
-                   │                           │
-            ┌──────▼──────┐             ┌──────▼──────┐
-            │   ROLE:     │             │   GROUP:    │
-            │  "Analyst"  │             │  "Finance"  │
-            └──────┬──────┘             └──────┬──────┘
-                   │                           │
-                   │                    ┌──────▼──────┐
-                   │                    │   ROLE:     │
-                   │                    │  "Viewer"   │
-                   │                    └──────┬──────┘
-                   │                           │
-                   └───────────┬───────────────┘
-                               │
-                        ┌──────▼──────┐
-                        │  EFFECTIVE  │
-                        │   ROLES:    │
-                        │  Analyst +  │
-                        │  Viewer     │
-                        └──────┬──────┘
-                               │
-              ┌────────────────┼────────────────┐
-              │                │                │
-       ┌──────▼──────┐ ┌──────▼──────┐ ┌──────▼──────┐
-       │  Analyst    │ │  Analyst    │ │   Viewer    │
-       │  Perms for  │ │  Perms for  │ │   Perms for │
-       │  Dashboard  │ │  Reports    │ │   Dashboard │
-       └──────┬──────┘ └──────┬──────┘ └──────┬──────┘
-              │                │                │
-              ▼                ▼                ▼
-  ┌─────────────────────────────────────────────────────┐
-  │              MERGED PERMISSION MATRIX               │
-  │                                                     │
-  │  dashboard           → view: ✓                     │
-  │  dashboard.revenue   → view: ✓                     │
-  │  dashboard.export    → view: ✗ (analyst:deny)      │
-  │  reports             → view: ✓                     │
-  │  reports.filters     → view: ✓                     │
-  │  reports.export      → view: ✓ (analyst:allow)     │
-  │  reports.delete      → view: ✗ (no grant = deny)   │
-  │  users               → view: ✗ (no grant)          │
-  └─────────────────────────────────────────────────────┘
-              │
-              ▼
-  Sent to React frontend via GET /api/v1/users/me/permissions
-  Frontend uses PermissionGate to show/hide UI elements
-```
-
-### 13.2 Entra ID Integration Flow
-
-```
-┌──────────┐     ┌──────────┐     ┌──────────────┐     ┌──────────────┐
-│  Browser │     │  React   │     │  FastAPI      │     │  Microsoft   │
-│          │     │  App     │     │  Backend      │     │  Entra ID    │
-└────┬─────┘     └────┬─────┘     └──────┬────────┘     └──────┬───────┘
-     │                │                   │                     │
-     │  Click "Login  │                   │                     │
-     │  with Microsoft│                   │                     │
-     │───────────────▶│                   │                     │
-     │                │                   │                     │
-     │                │ GET /auth/entra/  │                     │
-     │                │ authorize?tenant= │                     │
-     │                │──────────────────▶│                     │
-     │                │                   │                     │
-     │                │ Redirect URL with │                     │
-     │                │ state + PKCE      │                     │
-     │                │◀──────────────────│                     │
-     │                │                   │                     │
-     │ Redirect to    │                   │                     │
-     │ login.microsoft│                   │                     │
-     │ online.com     │                   │                     │
-     │◀───────────────│                   │                     │
-     │                                    │                     │
-     │ User authenticates with Microsoft  │                     │
-     │──────────────────────────────────────────────���────────▶│
-     │                                    │                     │
-     │ Auth code callback                 │                     │
-     │────────────────────────────────────▶│                     │
-     │                                    │                     │
-     │                                    │ Exchange code for   │
-     │                                    │ tokens              │
-     │                                    │────────────────────▶│
-     │                                    │                     │
-     │                                    │ id_token + access   │
-     │                                    │ token               │
-     │                                    │◀────────────────────│
-     │                                    │                     │
-     │                                    │ Validate id_token   │
-     │                                    │ Extract: oid, email │
-     │                                    │ name, groups        │
-     │                                    │                     │
-     │                                    │ Lookup user by oid  │
-     │                                    │ ┌────────────────┐  │
-     │                                    │ │ User exists?   │  │
-     │                                    │ │ YES → login    │  │
-     │                                    │ │ NO → provision │  │
-     │                                    │ │  • Create user │  │
-     │                                    │ │  • Map groups  │  │
-     │                                    │ │  • Set identity│  │
-     │                                    │ └────────────────┘  │
-     │                                    │                     │
-     │ Set cookies (refresh token)        │                     │
-     │ Return access token (JSON)         │                     │
-     │◀───────────────────────────────────│                     │
-     │                                    │                     │
-     │ Load app with permissions          │                     │
-     │───────────────▶│                   │                     │
-```
-
-### 13.3 Key Design Decisions Summary
-
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Multi-tenant DB model | Single DB, shared schema with RLS | Cost-effective, simpler operations, tenant isolation via RLS + app layer |
-| Permission model | Resource + Action matrix per Role | Industry-standard RBAC (similar to AWS IAM, Azure RBAC); granular yet manageable |
-| Permission granularity | Page → Section → Action (hierarchical) | Enables UI control at any level without rigid structure |
-| Token strategy | Short-lived JWT (15min) + refresh token | Balance between security and UX; stateless API validation |
-| Identity federation | OIDC with JIT provisioning + periodic sync | Seamless Entra integration; internal user always exists for permission mapping |
-| Caching | Redis with event-driven invalidation | Sub-millisecond permission checks; consistent invalidation via broker events |
-| Frontend permissions | Server-sent permission matrix + client-side gates | Zero-trust: UI never decides permissions; backend is the authority |
-| API versioning | URL path prefix | Simple, explicit, works with any HTTP client |
-| Message broker | Azure Service Bus (SaaS) | Managed service, dead-letter support, AMQP 1.0, no infra overhead |
-
----
-
-## 14. Middleware Implementation (Full Stack)
+## 10. Middleware Implementation (Full Stack)
 
 Every HTTP request to the Vesper API passes through an ordered middleware pipeline. The sections below describe what each middleware layer does, how to implement it, and where auth/authorization checks plug in.
 
-### 14.1 Middleware Execution Order
+### 10.1 Middleware Execution Order
 
 ```
 Incoming HTTP Request
@@ -2355,7 +1702,7 @@ Incoming HTTP Request
 
 ---
 
-### 14.2 MW-1: Correlation ID Middleware
+### 10.2 MW-1: Correlation ID Middleware
 
 **Purpose**: Attach a unique request ID to every request for distributed tracing across microservices and log correlation in Application Insights.
 
@@ -2384,7 +1731,7 @@ app.add_middleware(CorrelationIdMiddleware)
 
 ---
 
-### 14.3 MW-2: CORS Middleware (Per-Tenant Dynamic)
+### 10.3 MW-2: CORS Middleware (Per-Tenant Dynamic)
 
 **Purpose**: Allow browser requests only from origins registered for a tenant. Prevents cross-tenant data leakage via browser-side attacks.
 
@@ -2437,7 +1784,7 @@ class TenantCORSMiddleware(BaseHTTPMiddleware):
 
 ---
 
-### 14.4 MW-3: Rate Limiter Middleware
+### 10.4 MW-3: Rate Limiter Middleware
 
 **Purpose**: Prevent brute force, abuse, and overload. Uses Redis sorted sets for a sliding window algorithm.
 
@@ -2523,7 +1870,7 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
 
 ---
 
-### 14.5 MW-4: Tenant Context Middleware
+### 10.5 MW-4: Tenant Context Middleware
 
 **Purpose**: Resolve which tenant this request belongs to. Injects tenant context into every DB session (required for SQL Row-Level Security).
 
@@ -2609,7 +1956,7 @@ async def get_db(request: Request) -> AsyncSession:
 
 ---
 
-### 14.6 MW-5: JWT Authentication Middleware
+### 10.6 MW-5: JWT Authentication Middleware
 
 **Purpose**: Validate the Bearer token on every protected request. Populates `request.state.user` with the decoded claims. No DB hit — purely cryptographic verification.
 
@@ -2740,7 +2087,7 @@ class JWTService:
 
 ---
 
-### 14.7 MW-6: Session Validation Middleware
+### 10.7 MW-6: Session Validation Middleware
 
 **Purpose**: Ensure the session associated with the JWT has not been explicitly revoked (logout, admin action, security event). Redis lookup — O(1).
 
@@ -2792,7 +2139,7 @@ async def revoke_token(jti: str, exp: int, cache: CacheService):
 
 ---
 
-### 14.8 MW-7: Permission Middleware & Endpoint Decorators
+### 10.8 MW-7: Permission Middleware & Endpoint Decorators
 
 **Purpose**: RBAC enforcement. Two complementary mechanisms work together:
 
@@ -2915,7 +2262,7 @@ async def create_tenant(request: Request, ...):
 
 ---
 
-### 14.9 MW-8: Audit Logger Middleware
+### 10.9 MW-8: Audit Logger Middleware
 
 **Purpose**: Asynchronously record all state-changing operations without blocking the response.
 
@@ -2961,7 +2308,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
 
 ---
 
-### 14.10 MW-9: Global Error Handler
+### 10.10 MW-9: Global Error Handler
 
 **Purpose**: Convert all unhandled exceptions to the standard response envelope. No stack traces leak to clients.
 
@@ -3018,9 +2365,157 @@ def register_exception_handlers(app):
 
 ---
 
-## 15. WebSocket Architecture (Notifications & Chat)
+## 11. Caching, Messaging & Broker Architecture
 
-### 15.1 Overview
+### 11.1 Redis Caching Strategy
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         REDIS CACHE LAYERS                                  │
+│                                                                            │
+│  Layer 1: Session Cache                                                    │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ Key: session:{session_id}                                           │   │
+│  │ Value: { user_id, tenant_id, roles, revoked }                      │   │
+│  │ TTL: 15 minutes (matches access token)                             │   │
+│  │ Purpose: Fast session validation without DB hit                    │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                            │
+│  Layer 2: Permission Cache                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ Key: perm_matrix:{tenant_id}:{user_id}                             │   │
+│  │ Value: { full permission matrix JSON }                             │   │
+│  │ TTL: 5 minutes                                                     │   │
+│  │ Invalidation: On role/group/permission change                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                            │
+│  Layer 3: Tenant Config Cache                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ Key: tenant_config:{domain}                                        │   │
+│  │ Value: { full tenant config + theme + branding }                   │   │
+│  │ TTL: 10 minutes                                                    │   │
+│  │ Invalidation: On tenant config update                              │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                            │
+│  Layer 4: Rate Limiting                                                    │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ Key: rate:{tenant_id}:{user_id}:{endpoint}                        │   │
+│  │ Structure: Sorted set (sliding window)                             │   │
+│  │ TTL: Auto-expire with window                                       │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                            │
+│  Layer 5: API Response Cache                                               │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ Key: api_cache:{tenant_id}:{endpoint_hash}:{params_hash}          │   │
+│  │ TTL: Varies by endpoint (30s - 5min)                               │   │
+│  │ Purpose: Expensive queries (reports, analytics aggregations)       │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                            │
+│  Azure Service: Azure Cache for Redis (Premium tier, 6GB, cluster)        │
+│                                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 11.2 Message Broker Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     EVENT-DRIVEN ARCHITECTURE                               │
+│                                                                            │
+│  Broker: Azure Service Bus (SaaS) or RabbitMQ on Container Apps (IaaS)    │
+│                                                                            │
+│  ┌────────────────────────────────────────────────────────────────────┐     │
+│  │                         TOPICS / QUEUES                            │     │
+│  │                                                                    │     │
+│  │  ┌──────────────────────┐  Producers:     Consumers:              │     │
+│  │  │  user.events         │  Auth Service → Notification Service    │     │
+│  │  │  • user.created      │                 Audit Worker            │     │
+│  │  │  • user.updated      │                 Entra Sync Worker       │     │
+│  │  │  • user.deactivated  │                 Analytics Engine        │     │
+│  │  │  • user.login        │                                        │     │
+│  │  └──────────────────────┘                                        │     │
+│  │                                                                    │     │
+│  │  ┌──────────────────────┐  Producers:     Consumers:              │     │
+│  │  │  tenant.events       │  Tenant Mgmt → Provisioning Worker     │     │
+│  │  │  • tenant.created    │                 DNS Config Worker       │     │
+│  │  │  • tenant.suspended  │                 Notification Service    │     │
+│  │  │  • tenant.config_upd │                 Cache Invalidation     │     │
+│  │  └──────────────────────┘                                        │     │
+│  │                                                                    │     │
+│  │  ┌──────────────────────┐  Producers:     Consumers:              │     │
+│  │  │  permission.events   │  RBAC Service → Cache Invalidation     │     │
+│  │  │  • role.updated      │                 Audit Worker            │     │
+│  │  │  • perm.assigned     │                 WebSocket Notifier      │     │
+│  │  │  • group.membership  │                 (push to frontend)      │     │
+│  │  └──────────────────────┘                                        │     │
+│  │                                                                    │     │
+│  │  ┌──────────────────────┐  Producers:     Consumers:              │     │
+│  │  │  audit.events        │  All Services → Audit Writer            │     │
+│  │  │  • action.performed  │                 (bulk insert to SQL)    │     │
+│  │  └──────────────────────┘                                        │     │
+│  │                                                                    │     │
+│  │  ┌──────────────────────┐  Producers:     Consumers:              │     │
+│  │  │  entra.sync          │  Scheduler   → Entra Sync Worker       │     │
+│  │  │  • sync.requested    │                                        │     │
+│  │  │  • sync.completed    │                                        │     │
+│  │  └──────────────────────┘                                        │     │
+│  │                                                                    │     │
+│  └────────────────────────────────────────────────────────────────────┘     │
+│                                                                            │
+│  Benefits:                                                                 │
+│  • Decoupled services: auth doesn't wait for audit writes                 │
+│  • Resilience: if notification service is down, events queue up           │
+│  • Scale independently: audit writer can batch-process                    │
+│  • Cross-service communication without direct API coupling                │
+│                                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 11.3 Inter-Service Communication Pattern
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│              MICROSERVICE COMMUNICATION PATTERNS                            │
+│                                                                            │
+│  Synchronous (HTTP/gRPC):                                                  │
+│  ┌──────────────────────────────────────────────────────────────────┐      │
+│  │ • API Gateway → Auth Service (token validation)                  │      │
+│  │ • API Gateway → Core API (business logic)                       │      │
+│  │ • Core API → User Mgmt Service (user lookups)                   │      │
+│  │ • Tenant Mgmt → Entra Service (OIDC verification)               │      │
+│  │                                                                  │      │
+│  │ Pattern: Service mesh via Azure Container Apps internal DNS      │      │
+│  │ Format: REST (JSON) for simplicity, gRPC for high-throughput    │      │
+│  └──────────────────────────────────────────────────────────────────┘      │
+│                                                                            │
+│  Asynchronous (Message Broker):                                            │
+│  ┌──────────────────────────────────────────────────────────────────┐      │
+│  │ • Audit logging (fire-and-forget)                                │      │
+│  │ • Email/notification dispatch                                    │      │
+│  │ • Entra group sync (scheduled + on-demand)                      │      │
+│  │ • Cache invalidation broadcasts                                  │      │
+│  │ • Analytics event ingestion                                     │      │
+│  │                                                                  │      │
+│  │ Pattern: Pub/Sub topics with durable subscriptions              │      │
+│  │ Dead letter: Failed messages → DLQ for investigation            │      │
+│  └──────────────────────────────────────────────────────────────────┘      │
+│                                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+---
+
+## PART V — PLATFORM FEATURES
+
+*This part covers four advanced platform capabilities: real-time WebSocket communication for notifications and AI chat (§12), the multi-agent AI Chat system built on LangChain and LangGraph (§13), the Power BI embedded analytics system with backend-controlled dynamic menus (§14), and the file upload service supporting both SharePoint and Azure OneLake destinations with per-page routing and chunked streaming (§15). Each section follows the same structure: architecture overview → database schema → backend service → API endpoints.*
+
+---
+
+## 12. WebSocket Architecture (Notifications & Chat)
+
+### 12.1 Overview
 
 Two distinct WebSocket channels are maintained per authenticated user:
 
@@ -3039,7 +2534,7 @@ Browser
   └── WS /ws/v1/chat          → Full duplex: user sends query, server streams AI response
 ```
 
-### 15.2 WebSocket Authentication Flow
+### 12.2 WebSocket Authentication Flow
 
 WebSocket connections carry the access token in the URL query string because browser WebSocket API does not support custom headers.
 
@@ -3114,7 +2609,7 @@ ws_manager = ConnectionManager()
 
 ---
 
-### 15.3 Notification WebSocket
+### 12.3 Notification WebSocket
 
 **Endpoint** (`app/api/v1/websocket.py`):
 
@@ -3215,7 +2710,7 @@ await ws_manager.send_to_user(
 
 ---
 
-### 15.4 Database Schema for Notifications
+### 12.4 Database Schema for Notifications
 
 ```sql
 -- ═══════════════════════════════════════════════════════════════
@@ -3253,9 +2748,52 @@ CREATE INDEX ix_notifications_user ON notifications(tenant_id, user_id, is_read,
 
 ---
 
-## 16. AI Chat Agent — LangChain & LangGraph
 
-### 16.1 Architecture Overview
+### 12.7 WebSocket Token Expiry and Reconnection
+
+WebSocket access tokens share the same 15-minute TTL as REST API tokens. Unlike REST requests — which silently refresh via an Axios interceptor — an open WebSocket connection cannot swap its authentication token mid-session. The client must proactively reconnect with a fresh token before expiry.
+
+**Reconnection sequence:**
+
+```
+[T + 0m]  Client opens: WSS /ws/v1/notifications?token=<access_token>
+           Server validates token at handshake → sends {type: "connection.established"}
+
+[T +13m]  Client timer fires (2 min before expiry):
+           1. POST /api/v1/auth/refresh  — HttpOnly refresh cookie sent automatically
+           2. Receive new access_token   — expires_in: 900
+           3. ws.close(1000, "token_refresh")  — graceful close
+           4. ws = new WebSocket("/ws/v1/notifications?token=<new_access_token>")
+           5. Server validates new token → sends {type: "connection.established"}
+
+[T +28m]  Repeat the cycle
+```
+
+**Client-side pattern:**
+
+```typescript
+// Integrated into useNotificationSocket hook (see Section 16.4)
+function scheduleWsTokenRefresh(
+  expiresIn: number,
+  reconnect: () => void
+): ReturnType<typeof setTimeout> {
+  const delayMs = Math.max(0, (expiresIn - 120) * 1000); // 2 min buffer
+  return setTimeout(async () => {
+    try {
+      await authService.refresh();   // new access_token stored in memory
+      reconnect();                    // close old WS, open fresh connection
+    } catch {
+      authService.logout();           // refresh failed → force re-login
+    }
+  }, delayMs);
+}
+```
+
+**Server behaviour:** Token validation occurs only at the WebSocket handshake (`ws.accept()`). An already-authenticated, open connection is **not** forcibly closed when the token's expiry time passes — the connection continues until the client closes it or a network event drops it. A new connection attempt with an expired token will be rejected (code 4001).
+
+## 13. AI Chat Agent — LangChain & LangGraph
+
+### 13.1 Architecture Overview
 
 The AI Chat Agent allows users to ask natural language questions about their business data. It routes queries through a multi-agent orchestration layer built with **LangGraph**, calls specialized sub-agents (SQL, BI, summarization), and streams responses back via WebSocket.
 
@@ -3297,7 +2835,7 @@ LangGraph Orchestrator Agent
 Each chunk pushed via ws_manager.send_to_user() as it is generated
 ```
 
-### 16.2 Database Schema for Chat
+### 13.2 Database Schema for Chat
 
 ```sql
 -- ═══════════════════════════════════════════════════════════════
@@ -3343,7 +2881,7 @@ CREATE TABLE chat_agent_tools (
 
 ---
 
-### 16.3 Chat WebSocket Endpoint
+### 13.3 Chat WebSocket Endpoint
 
 ```python
 # app/api/v1/chat_ws.py
@@ -3452,7 +2990,7 @@ async def chat_ws(
 
 ---
 
-### 16.4 LangGraph Orchestrator
+### 13.4 LangGraph Orchestrator
 
 ```python
 # app/agents/orchestrator.py
@@ -3625,7 +3163,7 @@ class ChatOrchestrator:
 
 ---
 
-### 16.5 LangChain Tool Implementations
+### 13.5 LangChain Tool Implementations
 
 ```python
 # app/agents/tools.py
@@ -3714,7 +3252,7 @@ async def trend_analysis_tool(
 
 ---
 
-### 16.6 Chat REST APIs (Session Management)
+### 13.6 Chat REST APIs (Session Management)
 
 | Method | Endpoint | Description | Auth |
 |--------|----------|-------------|------|
@@ -3728,9 +3266,9 @@ async def trend_analysis_tool(
 
 ---
 
-## 17. Power BI Integration & Backend-Controlled Menu System
+## 14. Power BI Integration & Backend-Controlled Menu System
 
-### 17.1 Design Philosophy
+### 14.1 Design Philosophy
 
 The backend is the **sole authority** on:
 1. Which menu items a user sees
@@ -3761,7 +3299,7 @@ Frontend Flow:
 
 ---
 
-### 17.2 Database Schema for Menu & Power BI
+### 14.2 Database Schema for Menu & Power BI
 
 ```sql
 -- ═══════════════════════════════════════════════════════════════
@@ -3870,7 +3408,7 @@ CREATE INDEX ix_pbi_tokens_user_report ON powerbi_embed_tokens(
 
 ---
 
-### 17.3 Power BI Service (Token Generation)
+### 14.3 Power BI Service (Token Generation)
 
 ```python
 # app/services/powerbi_service.py
@@ -3996,7 +3534,7 @@ class PowerBIService:
 
 ---
 
-### 17.4 Menu API Implementation
+### 14.4 Menu API Implementation
 
 ```python
 # app/api/v1/navigation.py
@@ -4169,7 +3707,7 @@ class MenuService:
 
 ---
 
-### 17.5 Power BI Report APIs
+### 14.5 Power BI Report APIs
 
 | Method | Endpoint | Description | Auth | Permission |
 |--------|----------|-------------|------|------------|
@@ -4214,7 +3752,7 @@ class MenuService:
 
 ---
 
-### 17.6 Token Auto-Refresh Strategy
+### 14.6 Token Auto-Refresh Strategy
 
 Power BI embed tokens expire (default 60 min). The backend proactively refreshes them before expiry:
 
@@ -4237,484 +3775,1489 @@ Redis Cache Key: pbi_embed:{tenant_id}:{report_id}:{user_id}
 
 ---
 
-## 18. Complete API Reference — End-to-End
+## 15. File Upload — SharePoint & OneLake Integration
 
-This section catalogs every API endpoint in the order a frontend application would invoke them — from cold start to full operation.
+This section covers the architecture, API design, and implementation for uploading files from any React page to backend-configured destinations (Microsoft SharePoint or Azure OneLake / Data Lake Gen2). The system is intentionally **page-agnostic on the frontend and destination-agnostic on the backend** — a single set of APIs handles all upload scenarios regardless of which page initiates the upload or which storage target receives the data.
 
-### 18.1 Phase 1: Tenant Resolution (Cold Start)
+### 15.1 Design Decisions
 
-Called by the React app before any other API, to discover which tenant the user belongs to.
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| **Single API surface** | One endpoint handles all pages/destinations | Frontend pages do not embed destination details; all routing is resolved server-side by `page_key` |
+| **Streaming upload** | FastAPI `UploadFile` streams directly to storage | No full-file buffering in memory; constant ~8 MB working memory per concurrent upload |
+| **Chunked protocol** | Client splits large files (>5 MB) into chunks | Allows progress reporting, resume on failure, works within API Gateway body limits |
+| **Destination abstraction** | `FileUploadService` wraps both SharePoint and OneLake APIs | Frontend and upload endpoint are destination-unaware; swap backends without changing API contracts |
+| **Per-page destination config** | DB table `upload_page_config` maps `page_key` → destination | Any page can be re-pointed to a new path via DB config change, no code deployment needed |
+| **Multi-file in one request** | Multipart `multipart/form-data` with N files | Reduces round-trips for batch uploads; each file streams independently |
+| **Total size cap** | 200 MB default (configurable per tenant) | Prevents abuse; set per tenant in `upload_destinations` |
+
+### 15.2 Upload Architecture
 
 ```
-GET /api/v1/tenants/resolve?domain={domain}
-
-Auth: None (public)
+┌──────────────────────────────────────────────────────────────────────┐
+│                          React Page (any)                            │
+│                                                                      │
+│   Page sends X-Page-Key header (e.g. "energy_data_ingestion")       │
+│   File is chunked client-side (8 MB chunks via File.slice())        │
+│   Each chunk PUT to /api/v1/files/upload/{upload_id}/chunk          │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               │  HTTPS / multipart or chunked
+                               ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                      FastAPI Upload Endpoint                         │
+│                                                                      │
+│  1. Validate JWT + tenant context (middleware)                       │
+│  2. Check RBAC: files:upload permission for resource = page_key     │
+│  3. Resolve page_key → UploadDestination from DB / Redis cache      │
+│  4. Validate file types, total size, per-file size limits           │
+│  5. Stream each file chunk to FileUploadService                     │
+│  6. Record upload_history row (async, after stream completes)       │
+└──────────────┬───────────────────────────────────┬───────────────────┘
+               │                                   │
+               ▼                                   ▼
+┌──────────────────────────┐          ┌────────────────────────────────┐
+│  SharePoint Adapter      │          │  OneLake / ADLS Gen2 Adapter   │
+│                          │          │                                │
+│  Microsoft Graph API     │          │  azure-storage-file-datalake   │
+│  Resumable Upload Session│          │  DataLakeFileClient            │
+│  (files > 4 MB)          │          │  append_data() + flush_data()  │
+│  Direct PUT (≤ 4 MB)     │          │                                │
+└──────────────────────────┘          └────────────────────────────────┘
 ```
 
-**Request**:
-```
-GET /api/v1/tenants/resolve?domain=analytics.acme-corp.com
+### 15.3 Database Schema
+
+```sql
+-- Defines available upload destinations (SharePoint sites, OneLake accounts)
+-- One row per logical destination; shared across tenants or tenant-scoped
+CREATE TABLE upload_destinations (
+    destination_id      INT             IDENTITY(1,1) PRIMARY KEY,
+    tenant_id           NVARCHAR(100)   NOT NULL,
+    destination_name    NVARCHAR(200)   NOT NULL,           -- Human label
+    destination_type    NVARCHAR(20)    NOT NULL,           -- 'sharepoint' | 'onelake'
+
+    -- SharePoint fields (destination_type = 'sharepoint')
+    sp_site_id          NVARCHAR(500),                      -- Graph API site ID
+    sp_drive_id         NVARCHAR(500),                      -- Document library drive ID
+    sp_base_folder_path NVARCHAR(1000),                     -- e.g. /Uploads/EnergyData
+
+    -- OneLake / ADLS Gen2 fields (destination_type = 'onelake')
+    adls_account_name   NVARCHAR(200),                      -- Storage account name
+    adls_filesystem     NVARCHAR(200),                      -- Container / filesystem name
+    adls_base_path      NVARCHAR(1000),                     -- e.g. /raw/energy_uploads
+
+    -- Limits
+    max_total_mb        INT             DEFAULT 200,        -- Total per request (configurable)
+    max_file_mb         INT             DEFAULT 100,        -- Per file limit
+    allowed_extensions  NVARCHAR(500)   DEFAULT '*',        -- Comma-separated, '*' = all
+    allow_folder_create BIT             DEFAULT 1,          -- Can frontend create subfolders?
+
+    is_active           BIT             DEFAULT 1,
+    created_at          DATETIME2       DEFAULT GETUTCDATE(),
+    updated_at          DATETIME2       DEFAULT GETUTCDATE(),
+
+    INDEX IX_upload_dest_tenant (tenant_id)
+);
+
+-- Maps a React page_key to its configured upload destination + sub-path
+CREATE TABLE upload_page_config (
+    config_id           INT             IDENTITY(1,1) PRIMARY KEY,
+    tenant_id           NVARCHAR(100)   NOT NULL,
+    page_key            NVARCHAR(200)   NOT NULL,           -- Frontend page identifier
+    destination_id      INT             NOT NULL
+                        REFERENCES upload_destinations(destination_id),
+    sub_path            NVARCHAR(1000)  DEFAULT '',         -- Appended to base_folder_path
+    description         NVARCHAR(500),                      -- Internal note on purpose
+    is_active           BIT             DEFAULT 1,
+    created_at          DATETIME2       DEFAULT GETUTCDATE(),
+
+    UNIQUE (tenant_id, page_key),
+    INDEX IX_upload_page_tenant (tenant_id, page_key)
+);
+
+-- Audit trail of completed uploads
+CREATE TABLE upload_history (
+    upload_id           UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
+    tenant_id           NVARCHAR(100)   NOT NULL,
+    user_id             UNIQUEIDENTIFIER NOT NULL,
+    page_key            NVARCHAR(200)   NOT NULL,
+    destination_id      INT             NOT NULL,
+    destination_path    NVARCHAR(2000)  NOT NULL,           -- Full resolved path
+    file_name           NVARCHAR(500)   NOT NULL,
+    file_size_bytes     BIGINT          NOT NULL,
+    file_extension      NVARCHAR(50),
+    destination_url     NVARCHAR(2000),                     -- SharePoint/OneLake URL
+    status              NVARCHAR(20)    DEFAULT 'completed', -- 'completed' | 'failed'
+    error_message       NVARCHAR(MAX),
+    upload_started_at   DATETIME2       DEFAULT GETUTCDATE(),
+    upload_completed_at DATETIME2,
+    duration_ms         INT,
+
+    INDEX IX_upload_hist_tenant_user (tenant_id, user_id, upload_started_at DESC)
+);
+
+-- Tracks in-progress chunked uploads (TTL-cleaned by background job)
+CREATE TABLE upload_sessions (
+    session_id          UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
+    tenant_id           NVARCHAR(100)   NOT NULL,
+    user_id             UNIQUEIDENTIFIER NOT NULL,
+    page_key            NVARCHAR(200)   NOT NULL,
+    file_name           NVARCHAR(500)   NOT NULL,
+    file_size_bytes     BIGINT          NOT NULL,
+    total_chunks        INT             NOT NULL,
+    chunks_received     INT             DEFAULT 0,
+    bytes_received      BIGINT          DEFAULT 0,
+    -- Destination adapter state
+    destination_type    NVARCHAR(20)    NOT NULL,
+    adapter_session_url NVARCHAR(2000), -- SharePoint upload session URL
+    adls_file_path      NVARCHAR(2000), -- OneLake file path being appended
+    status              NVARCHAR(20)    DEFAULT 'in_progress',
+    expires_at          DATETIME2       NOT NULL,           -- Auto-expire stale sessions
+    created_at          DATETIME2       DEFAULT GETUTCDATE(),
+
+    INDEX IX_upload_sessions_tenant (tenant_id, status)
+);
 ```
 
-**Response** `200 OK`:
-```json
+### 15.4 Upload Protocol
+
+The system supports two upload modes selected by the client based on file size:
+
+#### Mode A — Direct Multipart Upload (≤ 5 MB per file)
+
+All files in one `multipart/form-data` POST. Suitable for small document uploads from any page.
+
+```
+POST /api/v1/files/upload
+Content-Type: multipart/form-data
+Authorization: Bearer <token>
+X-Page-Key: energy_data_ingestion
+
+Body:
+  files[]   = File1.xlsx (2 MB)
+  files[]   = File2.csv  (1 MB)
+  sub_path  = "2026/February"     ← optional: append to configured base path
+  new_folder = ""                 ← optional: create this folder first, then upload into it
+```
+
+#### Mode B — Chunked Upload (> 5 MB per file, or when total > 5 MB)
+
+Three-phase protocol for reliable large-file transfer:
+
+```
+Phase 1 — Initiate (once per file)
+──────────────────────────────────
+POST /api/v1/files/upload/init
 {
-  "status": "success",
-  "data": {
-    "tenant_id":      "uuid",
-    "tenant_slug":    "acme-corp",
-    "display_name":   "Acme Corporation",
-    "auth_methods":   ["entra", "form"],
-    "branding": {
-      "logo_url":          "https://cdn.vesper.com/tenants/acme/logo.svg",
-      "favicon_url":       "https://cdn.vesper.com/tenants/acme/favicon.ico",
-      "primary_color":     "#1A73E8",
-      "secondary_color":   "#F4F6F9",
-      "font_family":       "Inter, sans-serif",
-      "login_background_url": "https://cdn.vesper.com/tenants/acme/bg.jpg",
-      "custom_css":        ""
-    },
-    "features": {
-      "analytics_module": true,
-      "ai_chat_enabled":  true,
-      "powerbi_enabled":  true
-    },
-    "entra_config": {
-      "client_id":    "azure-app-client-id",
-      "authority_url": "https://login.microsoftonline.com/entra-tenant-id",
-      "scopes":        ["openid", "profile", "email"]
+  "page_key": "per_report_uploads",
+  "file_name": "Q1_2025_Budget.xlsx",
+  "file_size_bytes": 104857600,         ← 100 MB
+  "total_chunks": 13,                   ← ceil(100MB / 8MB)
+  "sub_path": "2026/Q1",
+  "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+}
+
+Response:
+{
+  "upload_session_id": "uuid",
+  "chunk_size_bytes": 8388608,          ← 8 MB recommended chunk size
+  "expires_at": "2026-02-27T12:30:00Z"
+}
+
+Phase 2 — Send Chunks (repeat for each chunk)
+──────────────────────────────────────────────
+PUT /api/v1/files/upload/{upload_session_id}/chunk
+Content-Range: bytes 0-8388607/104857600
+Content-Type: application/octet-stream
+
+<raw binary chunk data>
+
+Response (200 OK):
+{
+  "chunks_received": 1,
+  "bytes_received": 8388608,
+  "percent_complete": 8
+}
+
+Phase 3 — Complete (once all chunks received)
+──────────────────────────────────────────────
+POST /api/v1/files/upload/{upload_session_id}/complete
+
+Response:
+{
+  "upload_id": "uuid",
+  "file_name": "Q1_2025_Budget.xlsx",
+  "destination_url": "https://company.sharepoint.com/sites/...",
+  "file_size_bytes": 104857600,
+  "duration_ms": 4520
+}
+```
+
+### 15.5 Backend Service Implementation
+
+```python
+# app/services/file_upload_service.py
+from abc import ABC, abstractmethod
+from typing import AsyncIterator, Optional
+import aiohttp
+from azure.storage.filedatalake.aio import DataLakeServiceClient
+from app.core.config import settings
+
+
+class UploadDestination:
+    """Resolved destination config from DB."""
+    destination_type: str      # 'sharepoint' | 'onelake'
+    max_total_mb: int
+    max_file_mb: int
+    allowed_extensions: list[str]
+    allow_folder_create: bool
+    # SharePoint
+    sp_site_id: Optional[str]
+    sp_drive_id: Optional[str]
+    sp_base_folder_path: Optional[str]
+    # OneLake
+    adls_account_name: Optional[str]
+    adls_filesystem: Optional[str]
+    adls_base_path: Optional[str]
+
+
+class StorageAdapter(ABC):
+    """Abstract adapter — implement for each storage backend."""
+
+    @abstractmethod
+    async def create_upload_session(
+        self, file_name: str, file_size: int, dest_path: str
+    ) -> dict:
+        """Return adapter-specific session state for chunked upload."""
+
+    @abstractmethod
+    async def upload_chunk(
+        self, session_state: dict, chunk_data: bytes,
+        range_start: int, range_end: int, total_size: int
+    ) -> None:
+        """Append a single chunk to the in-progress upload."""
+
+    @abstractmethod
+    async def finalize_upload(self, session_state: dict) -> str:
+        """Complete the upload. Returns the final destination URL."""
+
+    @abstractmethod
+    async def upload_small_file(
+        self, file_stream: AsyncIterator[bytes],
+        dest_path: str, file_name: str
+    ) -> str:
+        """Single-shot upload for small files (≤ 4 MB). Returns URL."""
+
+    @abstractmethod
+    async def create_folder(self, dest_path: str, folder_name: str) -> str:
+        """Create a child folder. Returns full folder path."""
+
+
+class SharePointAdapter(StorageAdapter):
+    """
+    Microsoft Graph API adapter for SharePoint Online document libraries.
+    Uses resumable upload sessions for files > 4 MB.
+    """
+
+    GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+    SMALL_FILE_THRESHOLD = 4 * 1024 * 1024  # 4 MB
+
+    def __init__(self, site_id: str, drive_id: str):
+        self.site_id = site_id
+        self.drive_id = drive_id
+
+    async def _get_graph_token(self) -> str:
+        """Acquire app-only token for Microsoft Graph API."""
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"https://login.microsoftonline.com/{settings.AZURE_TENANT_ID}/oauth2/v2.0/token",
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": settings.GRAPH_CLIENT_ID,
+                    "client_secret": settings.GRAPH_CLIENT_SECRET,
+                    "scope": "https://graph.microsoft.com/.default",
+                }
+            ) as resp:
+                data = await resp.json()
+                return data["access_token"]
+
+    async def create_upload_session(
+        self, file_name: str, file_size: int, dest_path: str
+    ) -> dict:
+        token = await self._get_graph_token()
+        url = (
+            f"{self.GRAPH_BASE}/sites/{self.site_id}/drives/{self.drive_id}"
+            f"/items/root:/{dest_path}/{file_name}:/createUploadSession"
+        )
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                json={"item": {"@microsoft.graph.conflictBehavior": "rename"}}
+            ) as resp:
+                data = await resp.json()
+                return {"upload_url": data["uploadUrl"], "type": "sharepoint"}
+
+    async def upload_chunk(
+        self, session_state: dict, chunk_data: bytes,
+        range_start: int, range_end: int, total_size: int
+    ) -> None:
+        upload_url = session_state["upload_url"]
+        async with aiohttp.ClientSession() as session:
+            async with session.put(
+                upload_url,
+                headers={
+                    "Content-Range": f"bytes {range_start}-{range_end}/{total_size}",
+                    "Content-Length": str(len(chunk_data)),
+                },
+                data=chunk_data,
+            ) as resp:
+                if resp.status not in (200, 201, 202):
+                    raise RuntimeError(
+                        f"SharePoint chunk upload failed: {resp.status} {await resp.text()}"
+                    )
+
+    async def finalize_upload(self, session_state: dict) -> str:
+        # SharePoint auto-finalizes on last chunk — session_state carries the item URL
+        return session_state.get("item_url", "")
+
+    async def upload_small_file(
+        self, file_stream: AsyncIterator[bytes],
+        dest_path: str, file_name: str
+    ) -> str:
+        token = await self._get_graph_token()
+        data = b"".join([chunk async for chunk in file_stream])
+        url = (
+            f"{self.GRAPH_BASE}/sites/{self.site_id}/drives/{self.drive_id}"
+            f"/items/root:/{dest_path}/{file_name}:/content"
+        )
+        async with aiohttp.ClientSession() as session:
+            async with session.put(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/octet-stream",
+                },
+                data=data,
+            ) as resp:
+                result = await resp.json()
+                return result.get("webUrl", "")
+
+    async def create_folder(self, dest_path: str, folder_name: str) -> str:
+        token = await self._get_graph_token()
+        url = (
+            f"{self.GRAPH_BASE}/sites/{self.site_id}/drives/{self.drive_id}"
+            f"/items/root:/{dest_path}:/children"
+        )
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "name": folder_name,
+                    "folder": {},
+                    "@microsoft.graph.conflictBehavior": "fail",
+                }
+            ) as resp:
+                result = await resp.json()
+                return result.get("name", folder_name)
+
+
+class OneLakeAdapter(StorageAdapter):
+    """
+    Azure Data Lake Gen2 adapter for Microsoft Fabric OneLake.
+    Uses DataLakeFileClient append + flush pattern for chunked uploads.
+    """
+
+    def __init__(self, account_name: str, filesystem: str):
+        self.account_name = account_name
+        self.filesystem = filesystem
+        self._client = DataLakeServiceClient(
+            account_url=f"https://{account_name}.dfs.core.windows.net",
+            credential=settings.ADLS_CREDENTIAL,  # DefaultAzureCredential or SAS
+        )
+
+    async def create_upload_session(
+        self, file_name: str, file_size: int, dest_path: str
+    ) -> dict:
+        full_path = f"{dest_path}/{file_name}"
+        fs = self._client.get_file_system_client(self.filesystem)
+        file_client = fs.get_file_client(full_path)
+        await file_client.create_file()
+        return {"adls_path": full_path, "type": "onelake", "bytes_appended": 0}
+
+    async def upload_chunk(
+        self, session_state: dict, chunk_data: bytes,
+        range_start: int, range_end: int, total_size: int
+    ) -> None:
+        full_path = session_state["adls_path"]
+        offset = session_state["bytes_appended"]
+        fs = self._client.get_file_system_client(self.filesystem)
+        file_client = fs.get_file_client(full_path)
+        await file_client.append_data(data=chunk_data, offset=offset)
+        session_state["bytes_appended"] += len(chunk_data)
+
+    async def finalize_upload(self, session_state: dict) -> str:
+        full_path = session_state["adls_path"]
+        total = session_state["bytes_appended"]
+        fs = self._client.get_file_system_client(self.filesystem)
+        file_client = fs.get_file_client(full_path)
+        await file_client.flush_data(position=total)
+        return (
+            f"https://{self.account_name}.dfs.core.windows.net"
+            f"/{self.filesystem}/{full_path}"
+        )
+
+    async def upload_small_file(
+        self, file_stream: AsyncIterator[bytes],
+        dest_path: str, file_name: str
+    ) -> str:
+        data = b"".join([chunk async for chunk in file_stream])
+        full_path = f"{dest_path}/{file_name}"
+        fs = self._client.get_file_system_client(self.filesystem)
+        file_client = fs.get_file_client(full_path)
+        await file_client.upload_data(data=data, overwrite=False)
+        return (
+            f"https://{self.account_name}.dfs.core.windows.net"
+            f"/{self.filesystem}/{full_path}"
+        )
+
+    async def create_folder(self, dest_path: str, folder_name: str) -> str:
+        full_path = f"{dest_path}/{folder_name}"
+        fs = self._client.get_file_system_client(self.filesystem)
+        dir_client = fs.get_directory_client(full_path)
+        await dir_client.create_directory()
+        return full_path
+
+
+class FileUploadService:
+    """
+    Orchestrates file uploads across destinations.
+    Resolves page_key → UploadDestination → correct StorageAdapter.
+    """
+
+    def __init__(self, tenant_id: str):
+        self.tenant_id = tenant_id
+
+    async def resolve_destination(self, page_key: str) -> tuple[UploadDestination, StorageAdapter]:
+        """
+        Looks up upload_page_config → upload_destinations for a page_key.
+        Results are cached in Redis for 5 minutes.
+        """
+        cache_key = f"upload_config:{self.tenant_id}:{page_key}"
+        # ... Redis lookup + DB fallback ...
+        adapter = (
+            SharePointAdapter(dest.sp_site_id, dest.sp_drive_id)
+            if dest.destination_type == "sharepoint"
+            else OneLakeAdapter(dest.adls_account_name, dest.adls_filesystem)
+        )
+        return dest, adapter
+
+    def validate_files(
+        self, files: list, dest: UploadDestination
+    ) -> None:
+        """Validate file count, extensions, per-file size, and total size."""
+        total_bytes = 0
+        for f in files:
+            ext = f.filename.rsplit(".", 1)[-1].lower()
+            if dest.allowed_extensions != ["*"] and ext not in dest.allowed_extensions:
+                raise ValueError(f"File type '.{ext}' not allowed for this upload destination.")
+            if f.size and f.size > dest.max_file_mb * 1024 * 1024:
+                raise ValueError(
+                    f"'{f.filename}' exceeds {dest.max_file_mb} MB per-file limit."
+                )
+            total_bytes += f.size or 0
+
+        if total_bytes > dest.max_total_mb * 1024 * 1024:
+            raise ValueError(
+                f"Total upload size exceeds {dest.max_total_mb} MB limit for this page."
+            )
+
+    def resolve_path(
+        self, dest: UploadDestination, page_config_sub_path: str,
+        request_sub_path: str = ""
+    ) -> str:
+        """Build the full destination path from base + configured sub-path + request override."""
+        base = (
+            dest.sp_base_folder_path or dest.adls_base_path or ""
+        ).rstrip("/")
+        configured = page_config_sub_path.strip("/")
+        override = request_sub_path.strip("/")
+        parts = [p for p in [base, configured, override] if p]
+        return "/".join(parts)
+```
+
+### 15.6 API Endpoints
+
+#### GET /api/v1/files/upload-config
+
+Returns the upload configuration for a given page key. Called by the frontend on page load to configure the file picker (allowed types, size limits, destination label, folder creation allowed).
+
+```
+GET /api/v1/files/upload-config?page_key=energy_data_ingestion
+Authorization: Bearer <token>
+
+Response 200:
+{
+  "page_key": "energy_data_ingestion",
+  "destination_name": "Energy Data SharePoint Library",
+  "destination_type": "sharepoint",
+  "max_total_mb": 200,
+  "max_file_mb": 100,
+  "allowed_extensions": ["xlsx", "csv", "pdf", "zip"],
+  "allow_folder_create": true,
+  "base_path_label": "/EnergyData/Uploads"    ← display only, not actual path
+}
+```
+
+#### POST /api/v1/files/upload
+
+Direct multipart upload for files ≤ 5 MB per file (or small batches).
+
+```
+POST /api/v1/files/upload
+Content-Type: multipart/form-data
+Authorization: Bearer <token>
+X-Page-Key: energy_data_ingestion
+
+Form fields:
+  files      (required)  — one or more files
+  sub_path   (optional)  — override subfolder, e.g. "2026/February"
+  new_folder (optional)  — create this folder and upload into it
+
+Response 200:
+{
+  "uploaded": [
+    {
+      "file_name": "Budget_2026.xlsx",
+      "file_size_bytes": 524288,
+      "destination_url": "https://company.sharepoint.com/sites/.../Budget_2026.xlsx",
+      "upload_id": "uuid"
     }
+  ],
+  "failed": [],
+  "total_files": 1,
+  "duration_ms": 1240
+}
+```
+
+**Permission required:** `files:upload` on resource `page_key` value (e.g., `energy_data_ingestion`).
+
+```python
+# app/api/v1/endpoints/files.py
+from fastapi import APIRouter, UploadFile, File, Form, Depends, Header
+from typing import Optional
+from app.services.file_upload_service import FileUploadService
+from app.core.dependencies import get_current_user, require_permission
+
+router = APIRouter(prefix="/api/v1/files", tags=["File Upload"])
+
+CHUNK_STREAM_SIZE = 256 * 1024  # Read UploadFile in 256 KB increments
+
+
+@router.post("/upload")
+async def upload_files(
+    files: list[UploadFile] = File(...),
+    sub_path: Optional[str] = Form(default=""),
+    new_folder: Optional[str] = Form(default=""),
+    x_page_key: str = Header(..., alias="X-Page-Key"),
+    current_user = Depends(get_current_user),
+):
+    await require_permission(current_user, resource=x_page_key, action="upload")
+
+    svc = FileUploadService(tenant_id=current_user.tenant_id)
+    dest, adapter = await svc.resolve_destination(x_page_key)
+    svc.validate_files(files, dest)
+
+    # Create new folder if requested
+    if new_folder and dest.allow_folder_create:
+        base_path = svc.resolve_path(dest, "", sub_path)
+        new_folder = new_folder.strip().replace("/", "_")  # sanitize
+        created_path = await adapter.create_folder(base_path, new_folder)
+        dest_path = created_path
+    else:
+        dest_path = svc.resolve_path(dest, "", sub_path)
+
+    results, errors = [], []
+    import time
+    start = time.monotonic()
+
+    for f in files:
+        try:
+            url = await adapter.upload_small_file(
+                file_stream=f,
+                dest_path=dest_path,
+                file_name=f.filename,
+            )
+            results.append({
+                "file_name": f.filename,
+                "file_size_bytes": f.size,
+                "destination_url": url,
+            })
+        except Exception as exc:
+            errors.append({"file_name": f.filename, "error": str(exc)})
+
+    return {
+        "uploaded": results,
+        "failed": errors,
+        "total_files": len(files),
+        "duration_ms": int((time.monotonic() - start) * 1000),
+    }
+```
+
+#### POST /api/v1/files/upload/init
+
+Initiate a chunked upload session for a large file.
+
+```
+POST /api/v1/files/upload/init
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "page_key": "per_report_uploads",
+  "file_name": "Q1_Budget_Detailed.xlsx",
+  "file_size_bytes": 104857600,
+  "total_chunks": 13,
+  "sub_path": "2026/Q1",
+  "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+}
+
+Response 200:
+{
+  "upload_session_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "chunk_size_bytes": 8388608,
+  "expires_at": "2026-02-27T12:30:00Z",
+  "total_chunks": 13
+}
+```
+
+#### PUT /api/v1/files/upload/{session_id}/chunk
+
+Upload one chunk. The `Content-Range` header drives offset tracking server-side.
+
+```
+PUT /api/v1/files/upload/{session_id}/chunk
+Authorization: Bearer <token>
+Content-Range: bytes 0-8388607/104857600
+Content-Type: application/octet-stream
+
+<raw binary — 8 MB>
+
+Response 200:
+{
+  "upload_session_id": "...",
+  "chunks_received": 1,
+  "bytes_received": 8388608,
+  "percent_complete": 8,
+  "next_expected_byte": 8388608
+}
+
+Response 416 (Conflict — chunk out of sequence):
+{
+  "detail": "Expected bytes starting at 8388608, received 0",
+  "next_expected_byte": 8388608
+}
+```
+
+```python
+@router.put("/upload/{session_id}/chunk")
+async def upload_chunk(
+    session_id: str,
+    request: Request,
+    content_range: str = Header(...),
+    current_user = Depends(get_current_user),
+):
+    # Parse Content-Range: bytes start-end/total
+    import re
+    match = re.match(r"bytes (\d+)-(\d+)/(\d+)", content_range)
+    if not match:
+        raise HTTPException(400, "Invalid Content-Range header")
+
+    range_start = int(match.group(1))
+    range_end   = int(match.group(2))
+    total_size  = int(match.group(3))
+
+    # Load session from DB
+    session = await get_upload_session(session_id, current_user.tenant_id)
+    if not session:
+        raise HTTPException(404, "Upload session not found or expired")
+
+    # Enforce sequential ordering
+    if range_start != session.bytes_received:
+        raise HTTPException(416, {
+            "detail": f"Expected bytes starting at {session.bytes_received}",
+            "next_expected_byte": session.bytes_received,
+        })
+
+    # Stream raw body → adapter
+    chunk_data = await request.body()
+    _, adapter = await FileUploadService(current_user.tenant_id).resolve_destination(
+        session.page_key
+    )
+    await adapter.upload_chunk(
+        session_state=session.adapter_state,
+        chunk_data=chunk_data,
+        range_start=range_start,
+        range_end=range_end,
+        total_size=total_size,
+    )
+
+    # Update session counters
+    await update_upload_session(session_id, bytes_added=len(chunk_data))
+    new_bytes = session.bytes_received + len(chunk_data)
+
+    return {
+        "upload_session_id": session_id,
+        "chunks_received": session.chunks_received + 1,
+        "bytes_received": new_bytes,
+        "percent_complete": int(new_bytes / total_size * 100),
+        "next_expected_byte": new_bytes,
+    }
+```
+
+#### POST /api/v1/files/upload/{session_id}/complete
+
+Finalize the upload after all chunks are delivered. The backend flushes the file to storage and records the audit entry.
+
+```
+POST /api/v1/files/upload/{session_id}/complete
+Authorization: Bearer <token>
+
+Response 200:
+{
+  "upload_id": "uuid",
+  "file_name": "Q1_Budget_Detailed.xlsx",
+  "destination_url": "https://company.sharepoint.com/sites/...xlsx",
+  "file_size_bytes": 104857600,
+  "duration_ms": 4820
+}
+
+Response 409 (Conflict — not all chunks received):
+{
+  "detail": "Upload incomplete: 11 of 13 chunks received (91.9%)",
+  "bytes_received": 96468992,
+  "bytes_expected": 104857600
+}
+```
+
+#### POST /api/v1/files/folders
+
+Create a child folder within a page's configured upload destination.
+
+```
+POST /api/v1/files/folders
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "page_key": "energy_data_ingestion",
+  "parent_sub_path": "2026",
+  "folder_name": "February"
+}
+
+Response 201:
+{
+  "folder_name": "February",
+  "full_path": "/EnergyData/Uploads/2026/February",
+  "destination_type": "sharepoint"
+}
+
+Response 403:
+{
+  "detail": "Folder creation is not enabled for this upload destination."
+}
+```
+
+#### GET /api/v1/files/browse
+
+Browse the folder tree at a page's configured upload destination.
+
+```
+GET /api/v1/files/browse?page_key=energy_data_ingestion&sub_path=2026
+Authorization: Bearer <token>
+
+Response 200:
+{
+  "path": "/EnergyData/Uploads/2026",
+  "items": [
+    {"name": "January",  "type": "folder", "modified": "2026-01-31T18:20:00Z"},
+    {"name": "February", "type": "folder", "modified": "2026-02-15T09:10:00Z"}
+  ]
+}
+```
+
+#### GET /api/v1/files/history
+
+Returns the upload history for the current user (or all users for admins).
+
+```
+GET /api/v1/files/history?page_key=energy_data_ingestion&limit=20&offset=0
+Authorization: Bearer <token>
+
+Response 200:
+{
+  "total": 47,
+  "items": [
+    {
+      "upload_id": "uuid",
+      "file_name": "Q1_Budget.xlsx",
+      "file_size_bytes": 2097152,
+      "destination_url": "https://...",
+      "status": "completed",
+      "upload_completed_at": "2026-02-20T14:35:22Z",
+      "duration_ms": 980
+    }
+  ]
+}
+```
+
+### 15.7 File Validation & Security
+
+```python
+# app/services/file_upload_service.py — validation layer
+
+DANGEROUS_EXTENSIONS = {
+    "exe", "bat", "cmd", "com", "sh", "ps1", "vbs", "js",
+    "jar", "msi", "dll", "scr", "reg", "lnk", "pif"
+}
+
+MIME_TYPE_MAP = {
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "csv":  "text/csv",
+    "pdf":  "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "zip":  "application/zip",
+    "png":  "image/png",
+    "jpg":  "image/jpeg",
+}
+
+def validate_file_safety(filename: str, content_type: str) -> None:
+    """
+    Security validation applied to every uploaded file.
+    1. Block dangerous extensions unconditionally
+    2. Verify declared Content-Type matches file extension
+    3. Sanitize filename (no path traversal)
+    """
+    import os
+    # Strip path components (prevent directory traversal)
+    safe_name = os.path.basename(filename)
+    if safe_name != filename:
+        raise ValueError("Invalid filename: path traversal detected")
+
+    ext = safe_name.rsplit(".", 1)[-1].lower() if "." in safe_name else ""
+
+    if ext in DANGEROUS_EXTENSIONS:
+        raise ValueError(f"File type '.{ext}' is not permitted for upload.")
+
+    # Verify MIME type matches extension
+    expected_mime = MIME_TYPE_MAP.get(ext)
+    if expected_mime and content_type and content_type != expected_mime:
+        raise ValueError(
+            f"Content-Type mismatch: declared '{content_type}' "
+            f"but extension '.{ext}' expects '{expected_mime}'"
+        )
+```
+
+### 15.8 Frontend Integration Pattern
+
+The frontend uses a **common `useFileUpload` hook** across all pages. Each page only provides its `pageKey` — all destination logic stays on the server.
+
+```typescript
+// hooks/useFileUpload.ts
+import { useState, useCallback } from 'react';
+import { apiClient } from '../config/api';
+
+const CHUNK_SIZE = 8 * 1024 * 1024; // 8 MB
+
+interface UploadProgress {
+  fileName: string;
+  percent: number;
+  status: 'pending' | 'uploading' | 'done' | 'error';
+  destinationUrl?: string;
+  error?: string;
+}
+
+export function useFileUpload(pageKey: string) {
+  const [progress, setProgress] = useState<Record<string, UploadProgress>>({});
+
+  // Fetch config on component mount
+  const fetchConfig = useCallback(async () => {
+    const res = await apiClient.get('/files/upload-config', {
+      params: { page_key: pageKey }
+    });
+    return res.data;
+  }, [pageKey]);
+
+  const uploadFiles = useCallback(async (
+    files: File[],
+    options?: { subPath?: string; newFolder?: string }
+  ) => {
+    const initProgress = Object.fromEntries(
+      files.map(f => [f.name, { fileName: f.name, percent: 0, status: 'pending' as const }])
+    );
+    setProgress(initProgress);
+
+    await Promise.allSettled(
+      files.map(f => uploadSingleFile(f, options))
+    );
+  }, [pageKey]);
+
+  const uploadSingleFile = async (
+    file: File,
+    options?: { subPath?: string; newFolder?: string }
+  ) => {
+    const name = file.name;
+
+    // Small file: direct multipart
+    if (file.size <= CHUNK_SIZE) {
+      try {
+        setProgress(prev => ({ ...prev, [name]: { ...prev[name], status: 'uploading' }}));
+        const form = new FormData();
+        form.append('files', file);
+        if (options?.subPath)   form.append('sub_path', options.subPath);
+        if (options?.newFolder) form.append('new_folder', options.newFolder);
+
+        const res = await apiClient.post('/files/upload', form, {
+          headers: {
+            'X-Page-Key': pageKey,
+            'Content-Type': 'multipart/form-data',
+          },
+          onUploadProgress: (e) => {
+            const pct = Math.round((e.loaded / (e.total ?? 1)) * 100);
+            setProgress(prev => ({ ...prev, [name]: { ...prev[name], percent: pct }}));
+          }
+        });
+        const uploaded = res.data.uploaded[0];
+        setProgress(prev => ({
+          ...prev,
+          [name]: { ...prev[name], status: 'done', percent: 100,
+                    destinationUrl: uploaded.destination_url }
+        }));
+      } catch (err: any) {
+        setProgress(prev => ({
+          ...prev, [name]: { ...prev[name], status: 'error', error: err.message }
+        }));
+      }
+      return;
+    }
+
+    // Large file: chunked protocol
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+    // Phase 1 — init
+    const initRes = await apiClient.post('/files/upload/init', {
+      page_key:        pageKey,
+      file_name:       file.name,
+      file_size_bytes: file.size,
+      total_chunks:    totalChunks,
+      sub_path:        options?.subPath ?? '',
+      mime_type:       file.type,
+    });
+    const { upload_session_id } = initRes.data;
+
+    // Phase 2 — send chunks
+    for (let i = 0; i < totalChunks; i++) {
+      const start = i * CHUNK_SIZE;
+      const end   = Math.min(start + CHUNK_SIZE - 1, file.size - 1);
+      const chunk = file.slice(start, end + 1);
+
+      await apiClient.put(
+        `/files/upload/${upload_session_id}/chunk`,
+        chunk,
+        {
+          headers: {
+            'Content-Range': `bytes ${start}-${end}/${file.size}`,
+            'Content-Type': 'application/octet-stream',
+          },
+        }
+      );
+
+      const pct = Math.round(((i + 1) / totalChunks) * 95); // 95% on last chunk
+      setProgress(prev => ({
+        ...prev, [name]: { ...prev[name], status: 'uploading', percent: pct }
+      }));
+    }
+
+    // Phase 3 — complete
+    const completeRes = await apiClient.post(
+      `/files/upload/${upload_session_id}/complete`
+    );
+    setProgress(prev => ({
+      ...prev,
+      [name]: {
+        ...prev[name], status: 'done', percent: 100,
+        destinationUrl: completeRes.data.destination_url
+      }
+    }));
+  };
+
+  const createFolder = useCallback(async (
+    folderName: string, parentSubPath = ''
+  ) => {
+    const res = await apiClient.post('/files/folders', {
+      page_key:        pageKey,
+      parent_sub_path: parentSubPath,
+      folder_name:     folderName,
+    });
+    return res.data;
+  }, [pageKey]);
+
+  return { uploadFiles, createFolder, fetchConfig, progress };
+}
+```
+
+**Usage in any React page (each page only specifies its `pageKey`):**
+
+```tsx
+// pages/EnergyDataUpload.tsx
+import { useFileUpload } from '../hooks/useFileUpload';
+import { useEffect, useState } from 'react';
+
+export function EnergyDataUploadPage() {
+  const { uploadFiles, createFolder, fetchConfig, progress } =
+    useFileUpload('energy_data_ingestion');         // ← only thing that changes per page
+
+  const [config, setConfig] = useState<any>(null);
+
+  useEffect(() => {
+    fetchConfig().then(setConfig);
+  }, [fetchConfig]);
+
+  const handleDrop = async (acceptedFiles: File[]) => {
+    await uploadFiles(acceptedFiles, { subPath: '2026/February' });
+  };
+
+  return (
+    <div>
+      <DropZone
+        accept={config?.allowed_extensions}
+        maxSize={config?.max_file_mb * 1024 * 1024}
+        onDrop={handleDrop}
+      />
+      {Object.values(progress).map(p => (
+        <ProgressBar key={p.fileName} label={p.fileName} value={p.percent}
+                     status={p.status} url={p.destinationUrl} />
+      ))}
+    </div>
+  );
+}
+
+// pages/PERReportUpload.tsx  ← different page, same hook, different pageKey
+export function PERReportUploadPage() {
+  const { uploadFiles, progress } = useFileUpload('per_report_uploads');
+  // ... exactly the same UI code ...
+}
+```
+
+### 15.9 Redis Cache Keys
+
+| Key Pattern | TTL | Content |
+|-------------|-----|---------|
+| `upload_config:{tenant_id}:{page_key}` | 5 min | Resolved `UploadDestination` object |
+| `upload_session:{session_id}` | 1 hr | `UploadSession` state (bytes, adapter state) |
+| `upload_quota:{tenant_id}:{user_id}:{date}` | 24 hr | Daily bytes uploaded (rate limit) |
+
+### 15.10 RBAC Permission Model
+
+| Action | Permission Resource | Permission Action | Minimum Role |
+|--------|--------------------|--------------------|-------------|
+| Upload files | `{page_key}` | `upload` | Contributor |
+| Create folders | `{page_key}` | `upload` | Contributor |
+| Browse destination | `{page_key}` | `read` | Viewer |
+| View own upload history | `files` | `read` | Viewer |
+| View all upload history | `files` | `admin` | Manager |
+| Manage upload destinations | `upload_config` | `write` | Admin |
+
+The `page_key` is used as the RBAC resource, so each upload page can have independent access control — e.g., one team can upload to the PER reports library while another can only upload to the energy data folder.
+
+---
+
+---
+
+## PART VI — FRONTEND
+
+*This part covers the React frontend. Section 16 describes the provider and component architecture that drives permission-aware rendering and multi-tenant theming. Section 17 is a practical step-by-step integration guide showing exactly how the frontend calls every backend API, manages token lifecycles, embeds Power BI reports, handles WebSocket events, and drives chunked file uploads.*
+
+---
+
+## 16. Frontend Architecture (React)
+
+### 15.1 Project Structure
+
+```
+vesper-frontend/
+├── public/
+│   └── index.html
+├── src/
+│   ├── index.tsx
+│   ├── App.tsx                         # Root: TenantProvider → ThemeProvider → Router
+│   │
+│   ├── config/
+│   │   ├── api.ts                      # Axios instance, interceptors, base URLs
+│   │   ├── routes.ts                   # Route definitions with permission keys
+│   │   └── constants.ts
+│   │
+│   ├── providers/                      # React Context Providers
+│   │   ├── TenantProvider.tsx          # Resolves tenant, loads config
+│   │   ├── AuthProvider.tsx            # Auth state, tokens, login/logout
+│   │   ├── PermissionProvider.tsx      # Permission matrix context
+│   │   └── ThemeProvider.tsx           # Dynamic theming per tenant
+│   │
+│   ├── hooks/                          # Custom Hooks
+│   │   ├── useAuth.ts                  # Login, logout, token refresh
+│   │   ├── usePermission.ts           # Permission checks for components
+│   │   ├── useTenant.ts               # Tenant config access
+│   │   └── useApi.ts                   # API call wrapper with error handling
+│   │
+│   ├── components/                     # Shared Components
+│   │   ├── ui/                         # Design system primitives
+│   │   │   ├── Button.tsx
+│   │   │   ├── Card.tsx
+│   │   │   ├── DataTable.tsx
+│   │   │   ├── Modal.tsx
+│   │   │   └── ...
+│   │   │
+│   │   ├── auth/
+│   │   │   ├── LoginForm.tsx           # Form-based login
+│   │   │   ├── EntraLoginButton.tsx    # Microsoft SSO button
+│   │   │   ├── MfaVerification.tsx
+│   │   │   └── ProtectedRoute.tsx      # Route guard with permission check
+│   │   │
+│   │   ├── permissions/
+│   │   │   ├── PermissionGate.tsx      # Conditionally render children
+│   │   │   ├── PermissionMatrix.tsx    # Admin: visual permission editor
+│   │   │   └── RolePermissionEditor.tsx
+│   │   │
+│   │   ├── layout/
+│   │   │   ├── AppShell.tsx            # Main layout (sidebar + header + content)
+│   │   │   ├── Sidebar.tsx             # Permission-aware navigation
+│   │   │   ├── Header.tsx
+│   │   │   └── Breadcrumb.tsx
+│   │   │
+│   │   └── admin/
+│   │       ├── UserManagement.tsx
+│   │       ├── GroupManagement.tsx
+│   │       ├── RoleManagement.tsx
+│   │       ├── TenantSettings.tsx
+│   │       └── EntraConfig.tsx
+│   │
+│   ├── pages/                          # Page-level components
+│   │   ├── Dashboard.tsx
+│   │   ├── Reports.tsx
+│   │   ├── UserAdmin.tsx
+│   │   ├── Settings.tsx
+│   │   └── ...
+│   │
+│   ├── services/                       # API service layer
+│   │   ├── authService.ts
+│   │   ├── userService.ts
+│   │   ├── roleService.ts
+│   │   ├── tenantService.ts
+│   │   └── permissionService.ts
+│   │
+│   ├── themes/                         # Theme infrastructure
+│   │   ├── base.ts                     # Base design tokens
+│   │   ├── generateTheme.ts           # Dynamic theme from tenant config
+│   │   └── overrides.ts               # Component-level style overrides
+│   │
+│   ├── types/                          # TypeScript types
+│   │   ├── auth.ts
+│   │   ├── user.ts
+│   │   ├── permission.ts
+│   │   ├── tenant.ts
+│   │   └── api.ts
+│   │
+│   └── utils/
+│       ├── permissions.ts              # Permission helper functions
+│       ├── storage.ts                  # Secure token storage
+│       └── errorHandler.ts
+│
+├── package.json
+├── tsconfig.json
+├── vite.config.ts
+└── .env.example
+```
+
+### 15.2 Permission-Driven UI System
+
+#### 15.2.1 PermissionGate Component
+
+The core building block for permission-controlled UI:
+
+```tsx
+// src/components/permissions/PermissionGate.tsx
+
+interface PermissionGateProps {
+  resource: string;             // e.g. 'reports.export_button'
+  action?: string;              // defaults to 'view'
+  fallback?: React.ReactNode;   // What to render if denied (null = hidden)
+  children: React.ReactNode;
+}
+
+const PermissionGate: React.FC<PermissionGateProps> = ({
+  resource,
+  action = 'view',
+  fallback = null,
+  children,
+}) => {
+  const { hasPermission } = usePermission();
+
+  if (!hasPermission(resource, action)) {
+    return <>{fallback}</>;
+  }
+
+  return <>{children}</>;
+};
+
+// Usage examples:
+
+// Page-level: hide entire page
+<PermissionGate resource="reports">
+  <ReportsPage />
+</PermissionGate>
+
+// Section-level: hide a card/panel
+<PermissionGate resource="dashboard.revenue_chart">
+  <RevenueChartCard data={revenueData} />
+</PermissionGate>
+
+// Action-level: hide specific buttons
+<PermissionGate resource="reports.export_button">
+  <Button onClick={handleExport}>Export PDF</Button>
+</PermissionGate>
+
+// With fallback (disabled state instead of hidden)
+<PermissionGate
+  resource="users"
+  action="delete"
+  fallback={<Button disabled>Delete (No Permission)</Button>}
+>
+  <Button onClick={handleDelete} variant="danger">Delete User</Button>
+</PermissionGate>
+```
+
+#### 15.2.2 Permission-Aware Navigation
+
+```tsx
+// src/components/layout/Sidebar.tsx
+
+const navigationItems = [
+  {
+    label: 'Dashboard',
+    icon: DashboardIcon,
+    path: '/dashboard',
+    resource: 'dashboard',                    // Permission key
+  },
+  {
+    label: 'Reports',
+    icon: ReportsIcon,
+    path: '/reports',
+    resource: 'reports',
+    children: [
+      { label: 'Sales', path: '/reports/sales', resource: 'reports.sales' },
+      { label: 'Analytics', path: '/reports/analytics', resource: 'reports.analytics' },
+    ],
+  },
+  {
+    label: 'User Management',
+    icon: UsersIcon,
+    path: '/admin/users',
+    resource: 'admin.users',
+  },
+];
+
+const Sidebar = () => {
+  const { hasPermission } = usePermission();
+
+  // Filter navigation items based on permissions
+  const visibleItems = navigationItems.filter(item =>
+    hasPermission(item.resource, 'view')
+  );
+
+  return (
+    <nav>
+      {visibleItems.map(item => (
+        <NavItem key={item.path} {...item}>
+          {item.children?.filter(child =>
+            hasPermission(child.resource, 'view')
+          ).map(child => (
+            <NavItem key={child.path} {...child} />
+          ))}
+        </NavItem>
+      ))}
+    </nav>
+  );
+};
+```
+
+#### 15.2.3 Protected Route System
+
+```tsx
+// src/components/auth/ProtectedRoute.tsx
+
+interface ProtectedRouteProps {
+  resource: string;
+  action?: string;
+  children: React.ReactElement;
+}
+
+const ProtectedRoute = ({ resource, action = 'view', children }: ProtectedRouteProps) => {
+  const { isAuthenticated } = useAuth();
+  const { hasPermission, isLoading } = usePermission();
+
+  if (!isAuthenticated) return <Navigate to="/login" />;
+  if (isLoading) return <PageSkeleton />;
+  if (!hasPermission(resource, action)) return <AccessDenied />;
+
+  return children;
+};
+
+// Route configuration
+// src/config/routes.ts
+const routes = [
+  { path: '/dashboard',      element: <Dashboard />,      resource: 'dashboard' },
+  { path: '/reports',        element: <Reports />,        resource: 'reports' },
+  { path: '/admin/users',    element: <UserAdmin />,      resource: 'admin.users' },
+  { path: '/admin/roles',    element: <RoleAdmin />,      resource: 'admin.roles' },
+  { path: '/admin/groups',   element: <GroupAdmin />,      resource: 'admin.groups' },
+  { path: '/settings',       element: <Settings />,       resource: 'settings' },
+];
+
+// App.tsx
+<Routes>
+  {routes.map(({ path, element, resource }) => (
+    <Route
+      key={path}
+      path={path}
+      element={<ProtectedRoute resource={resource}>{element}</ProtectedRoute>}
+    />
+  ))}
+</Routes>
+```
+
+### 15.3 Multi-Tenant Theming System
+
+```tsx
+// src/providers/ThemeProvider.tsx
+
+const ThemeProvider = ({ children }: { children: React.ReactNode }) => {
+  const { tenantConfig } = useTenant();
+
+  // Generate MUI/CSS theme from tenant configuration
+  const theme = useMemo(() => {
+    const base = createBaseTheme();
+
+    return deepMerge(base, {
+      palette: {
+        primary: { main: tenantConfig.branding.primary_color },
+        secondary: { main: tenantConfig.branding.secondary_color },
+        accent: { main: tenantConfig.branding.accent_color },
+      },
+      typography: {
+        fontFamily: tenantConfig.branding.font_family,
+      },
+      // Component-level overrides from tenant config
+      components: tenantConfig.branding.component_overrides
+        ? JSON.parse(tenantConfig.branding.component_overrides)
+        : {},
+    });
+  }, [tenantConfig]);
+
+  return (
+    <MuiThemeProvider theme={theme}>
+      {/* Inject tenant custom CSS */}
+      {tenantConfig.branding.custom_css && (
+        <style>{tenantConfig.branding.custom_css}</style>
+      )}
+      {children}
+    </MuiThemeProvider>
+  );
+};
+```
+
+### 15.4 Tenant-Specific Component Customization
+
+```tsx
+// Tenant-specific component overrides without code changes
+// Stored in tenant_themes.component_overrides (JSON)
+
+{
+  "DataTable": {
+    "density": "comfortable",           // compact | standard | comfortable
+    "stripedRows": true,
+    "showColumnFilters": true
+  },
+  "Sidebar": {
+    "variant": "collapsed",             // expanded | collapsed | mini
+    "position": "left"
+  },
+  "LoginPage": {
+    "layout": "split",                  // centered | split | fullscreen
+    "showSocialLogin": true,
+    "customWelcomeText": "Welcome to Acme Analytics"
+  },
+  "Header": {
+    "showBreadcrumbs": true,
+    "showNotifications": true,
+    "showUserAvatar": true
   }
 }
+
+// Components read these overrides:
+const DataTable = ({ data, columns }) => {
+  const { getComponentConfig } = useTenant();
+  const config = getComponentConfig('DataTable');
+
+  return (
+    <MuiDataGrid
+      rows={data}
+      columns={columns}
+      density={config.density ?? 'standard'}
+      // ...
+    />
+  );
+};
 ```
 
-**Frontend action**: Store `tenant_id`, apply branding, decide which login options to show.
+### 15.5 Permission Matrix Admin UI
 
----
-
-### 18.2 Phase 2: Authentication
-
-#### 18.2.1 Form-Based Login
+The Tenant Admin sees a visual permission editor:
 
 ```
-POST /api/v1/auth/login
-
-Auth: None (public)
-Rate limit: 5 requests/min per IP
-```
-
-**Request**:
-```json
-{
-  "email":      "alice@acme-corp.com",
-  "password":   "...",
-  "tenant_id":  "uuid"
-}
-```
-
-**Response** `200 OK`:
-```json
-{
-  "status": "success",
-  "data": {
-    "access_token":  "eyJ...",
-    "token_type":    "bearer",
-    "expires_in":    900,
-    "mfa_required":  false
-  }
-}
-```
-> Refresh token is set as `HttpOnly; SameSite=Strict; Secure` cookie (`vesper_refresh`).
-
-**Response when MFA required** `200 OK`:
-```json
-{
-  "status": "success",
-  "data": {
-    "access_token": null,
-    "mfa_required": true,
-    "mfa_token":    "partial-session-token",
-    "mfa_methods":  ["totp"]
-  }
-}
-```
-
-#### 18.2.2 MFA Verification
-
-```
-POST /api/v1/auth/mfa/verify
-
-Auth: mfa_token (from login response)
-```
-
-**Request**:
-```json
-{
-  "mfa_token": "partial-session-token",
-  "code":      "123456"
-}
-```
-
-**Response** `200 OK`: Same as successful login (access_token + refresh cookie).
-
-#### 18.2.3 Microsoft Entra SSO
-
-```
-GET /api/v1/auth/entra/authorize?tenant_id={uuid}
-
-Auth: None (redirects to Microsoft)
-```
-
-Backend generates the PKCE challenge and returns the Microsoft authorization URL. Frontend redirects the user there.
-
-```
-GET /api/v1/auth/entra/callback?code={code}&state={state}
-
-Auth: None (callback from Microsoft)
-```
-
-Backend exchanges code for tokens, provisions user if first login, issues Vesper JWT.
-
-#### 18.2.4 Token Refresh
-
-```
-POST /api/v1/auth/refresh
-
-Auth: HttpOnly refresh token cookie (automatic)
-```
-
-**Response** `200 OK`:
-```json
-{
-  "status": "success",
-  "data": {
-    "access_token": "eyJ...",
-    "expires_in":   900
-  }
-}
-```
-
-#### 18.2.5 Logout
-
-```
-POST /api/v1/auth/logout
-
-Auth: Bearer (access token)
-```
-
-Revokes the current session. Clears refresh token cookie.
-
-#### 18.2.6 JWKS Endpoint (for token verification)
-
-```
-GET /api/v1/auth/.well-known/jwks.json
-
-Auth: None (public)
-```
-
-Returns public key set for JWT signature verification.
-
----
-
-### 18.3 Phase 3: Post-Login Bootstrap
-
-Called immediately after successful login. These three calls can be made in parallel.
-
-#### 18.3.1 Get Current User Profile
-
-```
-GET /api/v1/users/me
-
-Auth: Bearer
-```
-
-**Response**:
-```json
-{
-  "status": "success",
-  "data": {
-    "id":           "user-uuid",
-    "email":        "alice@acme-corp.com",
-    "display_name": "Alice Johnson",
-    "first_name":   "Alice",
-    "last_name":    "Johnson",
-    "avatar_url":   "https://...",
-    "user_type":    "standard",
-    "auth_provider":"entra",
-    "mfa_enabled":  true,
-    "roles":        ["analyst"],
-    "groups":       ["finance", "reporting"],
-    "last_login_at":"2026-02-26T09:00:00Z"
-  }
-}
-```
-
-#### 18.3.2 Get Permission Matrix
-
-```
-GET /api/v1/users/me/permissions
-
-Auth: Bearer
-```
-
-Returns the complete permission matrix. Cached in Redis (TTL 5 min).
-
-**Response**:
-```json
-{
-  "status": "success",
-  "data": {
-    "dashboard":                       {"view": true},
-    "dashboard.revenue_chart":         {"view": true},
-    "dashboard.export_button":         {"view": false},
-    "reports":                         {"view": true, "export": true},
-    "reports.sales":                   {"view": true, "export": true},
-    "reports.customers":               {"view": true, "export": false},
-    "admin.users":                     {"view": false},
-    "ai.chat":                         {"use": true},
-    "powerbi.sales_performance":       {"view": true},
-    "powerbi.customer_insights":       {"view": false}
-  }
-}
-```
-
-**Frontend action**: Store in `PermissionProvider` context. Gate all UI elements using this data. On `permission.changed` WebSocket event, re-fetch this endpoint.
-
-#### 18.3.3 Get Navigation Menu
-
-```
-GET /api/v1/navigation/menu
-
-Auth: Bearer
-```
-
-Returns the permission-filtered menu tree (see Section 17.4 for full schema).
-
----
-
-### 18.4 Phase 4: Menu-Driven Navigation
-
-#### 18.4.1 Sub-Menu Lazy Loading
-
-```
-GET /api/v1/navigation/menu/{item_id}/sub-menu
-
-Auth: Bearer
-```
-
-For deep hierarchies — load sub-items on demand when user expands a menu section.
-
-#### 18.4.2 Menu Item Detail
-
-```
-GET /api/v1/navigation/menu/{item_id}
-
-Auth: Bearer
-```
-
-Get metadata for a specific menu item (type, route, Power BI config reference).
-
----
-
-### 18.5 Phase 5: Power BI Report Loading
-
-When user navigates to a Power BI menu item (item_type = 'powerbi'):
-
-#### Step 1 — Get Report Config + Embed Token
-
-```
-GET /api/v1/powerbi/reports/{menu_item_id}/embed-token
-
-Auth: Bearer
-Permission: [menu item's resource_key]:view
-```
-
-Single API call that returns everything the frontend needs to render the report.
-
-**Response** (see Section 17.5 for full schema).
-
-#### Step 2 — Report Renders in Frontend
-
-Frontend uses the `embedUrl` + `embedToken` to initialize the Power BI JavaScript SDK. No credentials are ever passed to the frontend — only the short-lived embed token.
-
-#### Step 3 — Token Auto-Refresh
-
-```
-POST /api/v1/powerbi/reports/{menu_item_id}/refresh-token
-
-Auth: Bearer
-```
-
-Called by frontend 5 minutes before token expiry. Returns fresh embed token. If a valid cached token exists in Redis it is returned without a new Power BI API call.
-
----
-
-### 18.6 Phase 6: Real-Time Connections
-
-After the page loads, establish WebSocket connections:
-
-```
-# Notifications
-WS  /ws/v1/notifications?token={access_token}
-
-# Chat Agent (on-demand, when user opens chat)
-WS  /ws/v1/chat?token={access_token}&session_id={optional}
+┌──────────────────────────────────────────────────────────────────────────┐
+│  ROLE: Analyst                                              [Save] [×]  │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Resource                    │ View │ Create │ Edit │ Delete │ Export   │
+│  ═══════════════════════════╪══════╪════════╪══════╪════════╪════════  │
+│  ▼ Dashboard                │  ☑   │   -    │  -   │   -    │   -     │
+│    ├─ Revenue Chart         │  ☑   │   -    │  -   │   -    │   -     │
+│    ├─ User Stats Widget     │  ☑   │   -    │  -   │   -    │   -     │
+│    └─ Export Button          │  ☐   │   -    │  -   │   -    │   -     │
+│  ▼ Reports                  │  ☑   │   ☑   │  ☐   │   ☐    │   ☑    │
+│    ├─ Filters Panel         │  ☑   │   -    │  -   │   -    │   -     │
+│    ├─ Data Grid             │  ☑   │   -    │  ☐   │   -    │   -     │
+│    ├─ Share Button           │  ☑   │   -    │  -   │   -    │   -     │
+│    └─ Delete Button          │  ☐   │   -    │  -   │   -    │   -     │
+│  ▼ User Management          │  ☑   │   ☐   │  ☐   │   ☐    │   ☐    │
+│    ├─ Create Button          │  ☐   │   -    │  -   │   -    │   -     │
+│    ├─ Bulk Import            │  ☐   │   -    │  -   │   -    │   -     │
+│    └─ Role Assignment        │  ☐   │   -    │  -   │   -    │   -     │
+│  ▼ Settings                 │  ☐   │   -    │  ☐   │   -    │   -     │
+│                                                                         │
+│  ☑ = Allowed    ☐ = Denied    - = Not applicable for this resource     │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-### 18.7 User Management APIs
+## 17. Frontend Integration Guide
 
-| Method | Endpoint | Description | Auth | Permission |
-|--------|----------|-------------|------|------------|
-| `GET` | `/api/v1/users` | List users (paginated, filtered) | Bearer | `admin.users:view` |
-| `POST` | `/api/v1/users` | Create user | Bearer | `admin.users:create` |
-| `GET` | `/api/v1/users/{id}` | Get user detail | Bearer | `admin.users:view` |
-| `PUT` | `/api/v1/users/{id}` | Update user profile | Bearer | `admin.users:edit` |
-| `PATCH` | `/api/v1/users/{id}/status` | Activate/deactivate user | Bearer | `admin.users:edit` |
-| `DELETE` | `/api/v1/users/{id}` | Deactivate user | Bearer | `admin.users:delete` |
-| `GET` | `/api/v1/users/{id}/roles` | Get user's roles | Bearer | `admin.users:view` |
-| `PUT` | `/api/v1/users/{id}/roles` | Set user roles | Bearer | `admin.users:edit` |
-| `GET` | `/api/v1/users/{id}/groups` | Get user's groups | Bearer | `admin.users:view` |
-| `PUT` | `/api/v1/users/{id}/groups` | Set user groups | Bearer | `admin.users:edit` |
-| `GET` | `/api/v1/users/{id}/permissions` | Get effective permissions | Bearer | `admin.users:view` |
-| `GET` | `/api/v1/users/me` | Current user profile | Bearer | — |
-| `PUT` | `/api/v1/users/me` | Update own profile | Bearer | — |
-| `POST` | `/api/v1/users/me/change-password` | Change own password | Bearer | — |
-| `GET` | `/api/v1/users/me/permissions` | Own permission matrix | Bearer | — |
-| `GET` | `/api/v1/users/me/sessions` | Active sessions | Bearer | — |
-| `DELETE` | `/api/v1/users/me/sessions/{id}` | Revoke a session | Bearer | — |
-
----
-
-### 18.8 Group Management APIs
-
-| Method | Endpoint | Description | Auth | Permission |
-|--------|----------|-------------|------|------------|
-| `GET` | `/api/v1/groups` | List groups | Bearer | `admin.groups:view` |
-| `POST` | `/api/v1/groups` | Create group | Bearer | `admin.groups:create` |
-| `GET` | `/api/v1/groups/{id}` | Get group detail | Bearer | `admin.groups:view` |
-| `PUT` | `/api/v1/groups/{id}` | Update group | Bearer | `admin.groups:edit` |
-| `DELETE` | `/api/v1/groups/{id}` | Delete group | Bearer | `admin.groups:delete` |
-| `GET` | `/api/v1/groups/{id}/members` | List group members | Bearer | `admin.groups:view` |
-| `POST` | `/api/v1/groups/{id}/members` | Add members to group | Bearer | `admin.groups:edit` |
-| `DELETE` | `/api/v1/groups/{id}/members/{user_id}` | Remove member | Bearer | `admin.groups:edit` |
-| `GET` | `/api/v1/groups/{id}/roles` | Get group's roles | Bearer | `admin.groups:view` |
-| `PUT` | `/api/v1/groups/{id}/roles` | Set group roles | Bearer | `admin.groups:edit` |
-
----
-
-### 18.9 Role & Permission APIs
-
-| Method | Endpoint | Description | Auth | Permission |
-|--------|----------|-------------|------|------------|
-| `GET` | `/api/v1/roles` | List roles | Bearer | `admin.roles:view` |
-| `POST` | `/api/v1/roles` | Create role | Bearer | `admin.roles:create` |
-| `GET` | `/api/v1/roles/{id}` | Get role detail | Bearer | `admin.roles:view` |
-| `PUT` | `/api/v1/roles/{id}` | Update role | Bearer | `admin.roles:edit` |
-| `DELETE` | `/api/v1/roles/{id}` | Delete role (non-system) | Bearer | `admin.roles:delete` |
-| `GET` | `/api/v1/roles/{id}/permissions` | Get role's permission matrix | Bearer | `admin.roles:view` |
-| `PUT` | `/api/v1/roles/{id}/permissions` | Bulk update permissions | Bearer | `admin.roles:edit` |
-| `GET` | `/api/v1/resources` | List all resources | Bearer | `admin.roles:view` |
-| `POST` | `/api/v1/resources` | Register new resource | Bearer | `super_admin` |
-| `GET` | `/api/v1/permissions/matrix` | Full permission matrix grid | Bearer | `admin.roles:view` |
-
----
-
-### 18.10 Navigation & Menu Admin APIs
-
-| Method | Endpoint | Description | Auth | Permission |
-|--------|----------|-------------|------|------------|
-| `GET` | `/api/v1/navigation/menu` | Get user's filtered menu | Bearer | — (filtered by perms) |
-| `GET` | `/api/v1/navigation/menu/{id}/sub-menu` | Lazy-load sub-items | Bearer | — (filtered) |
-| `GET` | `/api/v1/admin/navigation/menu` | Admin: full menu tree (all items) | Bearer | `admin.menu:view` |
-| `POST` | `/api/v1/admin/navigation/menu` | Admin: create menu item | Bearer | `admin.menu:create` |
-| `PUT` | `/api/v1/admin/navigation/menu/{id}` | Admin: update menu item | Bearer | `admin.menu:edit` |
-| `DELETE` | `/api/v1/admin/navigation/menu/{id}` | Admin: delete menu item | Bearer | `admin.menu:delete` |
-| `POST` | `/api/v1/admin/navigation/menu/reorder` | Admin: reorder items | Bearer | `admin.menu:edit` |
-| `GET` | `/api/v1/admin/navigation/menu/{id}/assign-report` | Get report assignment | Bearer | `admin.menu:view` |
-| `PUT` | `/api/v1/admin/navigation/menu/{id}/assign-report` | Assign Power BI report | Bearer | `admin.menu:edit` |
-
----
-
-### 18.11 AI Chat APIs
-
-| Method | Endpoint | Description | Auth | Permission |
-|--------|----------|-------------|------|------------|
-| `WS` | `/ws/v1/chat` | Bidirectional chat WebSocket | Bearer (query param) | `ai.chat:use` |
-| `GET` | `/api/v1/chat/sessions` | List chat sessions | Bearer | `ai.chat:use` |
-| `POST` | `/api/v1/chat/sessions` | Create session | Bearer | `ai.chat:use` |
-| `GET` | `/api/v1/chat/sessions/{id}` | Get session | Bearer | `ai.chat:use` |
-| `DELETE` | `/api/v1/chat/sessions/{id}` | Delete session | Bearer | `ai.chat:use` |
-| `GET` | `/api/v1/chat/sessions/{id}/messages` | Get history (paginated) | Bearer | `ai.chat:use` |
-| `GET` | `/api/v1/chat/tools` | List enabled agent tools | Bearer | `ai.chat:use` |
-| `PUT` | `/api/v1/admin/chat/tools/{name}` | Enable/disable tool | Bearer | `admin.ai:configure` |
-
----
-
-### 18.12 Notification APIs
-
-| Method | Endpoint | Description | Auth |
-|--------|----------|-------------|------|
-| `WS` | `/ws/v1/notifications` | Notification push channel | Bearer (query param) |
-| `GET` | `/api/v1/notifications` | List notifications | Bearer |
-| `GET` | `/api/v1/notifications/unread-count` | Unread count for badge | Bearer |
-| `PATCH` | `/api/v1/notifications/{id}/read` | Mark as read | Bearer |
-| `POST` | `/api/v1/notifications/read-all` | Mark all as read | Bearer |
-| `DELETE` | `/api/v1/notifications/{id}` | Delete notification | Bearer |
-
----
-
-### 18.13 Tenant Management APIs (Super Admin)
-
-| Method | Endpoint | Description | Auth | Role |
-|--------|----------|-------------|------|------|
-| `GET` | `/api/v1/tenants` | List all tenants | Bearer | `super_admin` |
-| `POST` | `/api/v1/tenants` | Create tenant | Bearer | `super_admin` |
-| `GET` | `/api/v1/tenants/{id}` | Tenant detail | Bearer | `super_admin` |
-| `PUT` | `/api/v1/tenants/{id}` | Update tenant | Bearer | `super_admin` |
-| `PATCH` | `/api/v1/tenants/{id}/status` | Suspend/activate | Bearer | `super_admin` |
-| `POST` | `/api/v1/tenants/{id}/domains` | Add custom domain | Bearer | `super_admin` |
-| `DELETE` | `/api/v1/tenants/{id}/domains/{domain_id}` | Remove domain | Bearer | `super_admin` |
-| `GET` | `/api/v1/tenants/{id}/config` | Get config values | Bearer | `super_admin` |
-| `PUT` | `/api/v1/tenants/{id}/config` | Update config values | Bearer | `super_admin` |
-| `GET` | `/api/v1/tenants/{id}/theme` | Get theme | Bearer | `tenant_admin` |
-| `PUT` | `/api/v1/tenants/{id}/theme` | Update theme/branding | Bearer | `tenant_admin` |
-
----
-
-### 18.14 Entra Integration APIs
-
-| Method | Endpoint | Description | Auth | Permission |
-|--------|----------|-------------|------|------------|
-| `GET` | `/api/v1/auth/entra/authorize` | Start Entra OIDC flow | Public | — |
-| `GET` | `/api/v1/auth/entra/callback` | Entra OIDC callback | Public | — |
-| `GET` | `/api/v1/entra/config` | Get Entra OIDC config | Bearer | `admin.entra:view` |
-| `PUT` | `/api/v1/entra/config` | Update Entra config | Bearer | `admin.entra:edit` |
-| `GET` | `/api/v1/entra/groups` | List Entra group mappings | Bearer | `admin.entra:view` |
-| `POST` | `/api/v1/entra/groups/map` | Create group mapping | Bearer | `admin.entra:edit` |
-| `DELETE` | `/api/v1/entra/groups/map/{id}` | Remove group mapping | Bearer | `admin.entra:edit` |
-| `POST` | `/api/v1/entra/sync` | Trigger manual group sync | Bearer | `admin.entra:sync` |
-| `GET` | `/api/v1/entra/sync/status` | Get last sync status | Bearer | `admin.entra:view` |
-
----
-
-### 18.15 Audit & System APIs
-
-| Method | Endpoint | Description | Auth | Permission |
-|--------|----------|-------------|------|------------|
-| `GET` | `/api/v1/audit/logs` | Query audit log | Bearer | `admin.audit:view` |
-| `GET` | `/api/v1/audit/login-history` | Login history | Bearer | `admin.audit:view` |
-| `GET` | `/api/v1/health` | Health check | Public | — |
-| `GET` | `/api/v1/health/ready` | Readiness check (DB + Redis) | Public | — |
-| `GET` | `/api/v1/versions` | API version discovery | Public | — |
-| `GET` | `/api/v1/auth/.well-known/jwks.json` | Public key set | Public | — |
-
----
-
-## 19. Frontend Integration Guide
-
-### 19.1 Application Bootstrap Sequence
+### 16.1 Application Bootstrap Sequence
 
 ```
 App Start (user visits analytics.acme-corp.com)
@@ -4748,7 +5291,7 @@ App Start (user visits analytics.acme-corp.com)
 
 ---
 
-### 19.2 Token Lifecycle Management (Frontend)
+### 16.2 Token Lifecycle Management (Frontend)
 
 ```typescript
 // src/services/authService.ts
@@ -4805,7 +5348,7 @@ apiClient.interceptors.response.use(
 
 ---
 
-### 19.3 Power BI Embedding (React Component)
+### 16.3 Power BI Embedding (React Component)
 
 ```typescript
 // src/components/PowerBIReportViewer.tsx
@@ -4883,7 +5426,7 @@ export function PowerBIReportViewer({ menuItemId }: Props) {
 
 ---
 
-### 19.4 WebSocket Notification Client
+### 16.4 WebSocket Notification Client
 
 ```typescript
 // src/hooks/useNotificationSocket.ts
@@ -4962,7 +5505,7 @@ export function useNotificationSocket() {
 
 ---
 
-### 19.5 Menu Rendering & Dynamic Navigation
+### 16.5 Menu Rendering & Dynamic Navigation
 
 ```typescript
 // src/components/layout/Sidebar.tsx
@@ -5025,7 +5568,7 @@ function NavItem({ item }: { item: MenuItem }) {
 
 ---
 
-### 19.6 Content Security Policy Update for Power BI
+### 16.6 Content Security Policy Update for Power BI
 
 Power BI embedding requires adding Power BI domains to the CSP:
 
@@ -5051,7 +5594,7 @@ Content-Security-Policy:
 
 ---
 
-### 19.7 Redis Cache Keys — Complete Reference
+### 16.7 Redis Cache Keys — Complete Reference
 
 | Purpose | Key Pattern | TTL |
 |---------|-------------|-----|
@@ -5069,7 +5612,7 @@ Content-Security-Policy:
 
 ---
 
-### 19.8 WebSocket Message Type Registry
+### 16.8 WebSocket Message Type Registry
 
 | Type | Direction | Description |
 |------|-----------|-------------|
@@ -5096,3 +5639,781 @@ Content-Security-Policy:
 **Document End**
 
 *This document serves as the architectural blueprint for the Vesper Analytics multi-tenant platform. All design decisions should be reviewed and approved before implementation begins. Implementation should proceed in phases, starting with the core tenant and user management system, followed by the RBAC engine, Entra integration, WebSocket infrastructure, AI Chat Agent, Power BI integration, and finally the frontend permission system.*
+
+---
+
+## PART VII — REFERENCE & OPERATIONS
+
+*This part serves as the reference layer for the rest of the document. The complete API catalogue (§18) is organised by the order a frontend client calls the APIs — from cold start to full operation. Infrastructure (§19) covers the Azure topology and CI/CD pipeline. The appendix (§20) provides entity relationship diagrams and a key design decisions summary. Use these sections as a reference rather than reading sequentially.*
+
+---
+
+## 18. Complete API Reference — End-to-End
+
+This section catalogs every API endpoint in the order a frontend application would invoke them — from cold start to full operation.
+
+### 17.1 Phase 1: Tenant Resolution (Cold Start)
+
+Called by the React app before any other API, to discover which tenant the user belongs to.
+
+```
+GET /api/v1/tenants/resolve?domain={domain}
+
+Auth: None (public)
+```
+
+**Request**:
+```
+GET /api/v1/tenants/resolve?domain=analytics.acme-corp.com
+```
+
+**Response** `200 OK`:
+```json
+{
+  "status": "success",
+  "data": {
+    "tenant_id":      "uuid",
+    "tenant_slug":    "acme-corp",
+    "display_name":   "Acme Corporation",
+    "auth_methods":   ["entra", "form"],
+    "branding": {
+      "logo_url":          "https://cdn.vesper.com/tenants/acme/logo.svg",
+      "favicon_url":       "https://cdn.vesper.com/tenants/acme/favicon.ico",
+      "primary_color":     "#1A73E8",
+      "secondary_color":   "#F4F6F9",
+      "font_family":       "Inter, sans-serif",
+      "login_background_url": "https://cdn.vesper.com/tenants/acme/bg.jpg",
+      "custom_css":        ""
+    },
+    "features": {
+      "analytics_module": true,
+      "ai_chat_enabled":  true,
+      "powerbi_enabled":  true
+    },
+    "entra_config": {
+      "client_id":    "azure-app-client-id",
+      "authority_url": "https://login.microsoftonline.com/entra-tenant-id",
+      "scopes":        ["openid", "profile", "email"]
+    }
+  }
+}
+```
+
+**Frontend action**: Store `tenant_id`, apply branding, decide which login options to show.
+
+---
+
+### 17.2 Phase 2: Authentication
+
+#### 17.2.1 Form-Based Login
+
+```
+POST /api/v1/auth/login
+
+Auth: None (public)
+Rate limit: 5 requests/min per IP
+```
+
+**Request**:
+```json
+{
+  "email":      "alice@acme-corp.com",
+  "password":   "...",
+  "tenant_id":  "uuid"
+}
+```
+
+**Response** `200 OK`:
+```json
+{
+  "status": "success",
+  "data": {
+    "access_token":  "eyJ...",
+    "token_type":    "bearer",
+    "expires_in":    900,
+    "mfa_required":  false
+  }
+}
+```
+> Refresh token is set as `HttpOnly; SameSite=Strict; Secure` cookie (`vesper_refresh`).
+
+**Response when MFA required** `200 OK`:
+```json
+{
+  "status": "success",
+  "data": {
+    "access_token": null,
+    "mfa_required": true,
+    "mfa_token":    "partial-session-token",
+    "mfa_methods":  ["totp"]
+  }
+}
+```
+
+#### 17.2.2 MFA Verification
+
+```
+POST /api/v1/auth/mfa/verify
+
+Auth: mfa_token (from login response)
+```
+
+**Request**:
+```json
+{
+  "mfa_token": "partial-session-token",
+  "code":      "123456"
+}
+```
+
+**Response** `200 OK`: Same as successful login (access_token + refresh cookie).
+
+#### 17.2.3 Microsoft Entra SSO
+
+```
+GET /api/v1/auth/entra/authorize?tenant_id={uuid}
+
+Auth: None (redirects to Microsoft)
+```
+
+Backend generates the PKCE challenge and returns the Microsoft authorization URL. Frontend redirects the user there.
+
+```
+GET /api/v1/auth/entra/callback?code={code}&state={state}
+
+Auth: None (callback from Microsoft)
+```
+
+Backend exchanges code for tokens, provisions user if first login, issues Vesper JWT.
+
+#### 17.2.4 Token Refresh
+
+```
+POST /api/v1/auth/refresh
+
+Auth: HttpOnly refresh token cookie (automatic)
+```
+
+**Response** `200 OK`:
+```json
+{
+  "status": "success",
+  "data": {
+    "access_token": "eyJ...",
+    "expires_in":   900
+  }
+}
+```
+
+#### 17.2.5 Logout
+
+```
+POST /api/v1/auth/logout
+
+Auth: Bearer (access token)
+```
+
+Revokes the current session. Clears refresh token cookie.
+
+#### 17.2.6 JWKS Endpoint (for token verification)
+
+```
+GET /api/v1/auth/.well-known/jwks.json
+
+Auth: None (public)
+```
+
+Returns public key set for JWT signature verification.
+
+---
+
+### 17.3 Phase 3: Post-Login Bootstrap
+
+Called immediately after successful login. These three calls can be made in parallel.
+
+#### 17.3.1 Get Current User Profile
+
+```
+GET /api/v1/users/me
+
+Auth: Bearer
+```
+
+**Response**:
+```json
+{
+  "status": "success",
+  "data": {
+    "id":           "user-uuid",
+    "email":        "alice@acme-corp.com",
+    "display_name": "Alice Johnson",
+    "first_name":   "Alice",
+    "last_name":    "Johnson",
+    "avatar_url":   "https://...",
+    "user_type":    "standard",
+    "auth_provider":"entra",
+    "mfa_enabled":  true,
+    "roles":        ["analyst"],
+    "groups":       ["finance", "reporting"],
+    "last_login_at":"2026-02-26T09:00:00Z"
+  }
+}
+```
+
+#### 17.3.2 Get Permission Matrix
+
+```
+GET /api/v1/users/me/permissions
+
+Auth: Bearer
+```
+
+Returns the complete permission matrix. Cached in Redis (TTL 5 min).
+
+**Response**:
+```json
+{
+  "status": "success",
+  "data": {
+    "dashboard":                       {"view": true},
+    "dashboard.revenue_chart":         {"view": true},
+    "dashboard.export_button":         {"view": false},
+    "reports":                         {"view": true, "export": true},
+    "reports.sales":                   {"view": true, "export": true},
+    "reports.customers":               {"view": true, "export": false},
+    "admin.users":                     {"view": false},
+    "ai.chat":                         {"use": true},
+    "powerbi.sales_performance":       {"view": true},
+    "powerbi.customer_insights":       {"view": false}
+  }
+}
+```
+
+**Frontend action**: Store in `PermissionProvider` context. Gate all UI elements using this data. On `permission.changed` WebSocket event, re-fetch this endpoint.
+
+#### 17.3.3 Get Navigation Menu
+
+```
+GET /api/v1/navigation/menu
+
+Auth: Bearer
+```
+
+Returns the permission-filtered menu tree (see Section 17.4 for full schema).
+
+---
+
+### 17.4 Phase 4: Menu-Driven Navigation
+
+#### 17.4.1 Sub-Menu Lazy Loading
+
+```
+GET /api/v1/navigation/menu/{item_id}/sub-menu
+
+Auth: Bearer
+```
+
+For deep hierarchies — load sub-items on demand when user expands a menu section.
+
+#### 17.4.2 Menu Item Detail
+
+```
+GET /api/v1/navigation/menu/{item_id}
+
+Auth: Bearer
+```
+
+Get metadata for a specific menu item (type, route, Power BI config reference).
+
+---
+
+### 17.5 Phase 5: Power BI Report Loading
+
+When user navigates to a Power BI menu item (item_type = 'powerbi'):
+
+#### Step 1 — Get Report Config + Embed Token
+
+```
+GET /api/v1/powerbi/reports/{menu_item_id}/embed-token
+
+Auth: Bearer
+Permission: [menu item's resource_key]:view
+```
+
+Single API call that returns everything the frontend needs to render the report.
+
+**Response** (see Section 17.5 for full schema).
+
+#### Step 2 — Report Renders in Frontend
+
+Frontend uses the `embedUrl` + `embedToken` to initialize the Power BI JavaScript SDK. No credentials are ever passed to the frontend — only the short-lived embed token.
+
+#### Step 3 — Token Auto-Refresh
+
+```
+POST /api/v1/powerbi/reports/{menu_item_id}/refresh-token
+
+Auth: Bearer
+```
+
+Called by frontend 5 minutes before token expiry. Returns fresh embed token. If a valid cached token exists in Redis it is returned without a new Power BI API call.
+
+---
+
+### 17.6 Phase 6: Real-Time Connections
+
+After the page loads, establish WebSocket connections:
+
+```
+# Notifications
+WS  /ws/v1/notifications?token={access_token}
+
+# Chat Agent (on-demand, when user opens chat)
+WS  /ws/v1/chat?token={access_token}&session_id={optional}
+```
+
+---
+
+### 17.7 User Management APIs
+
+| Method | Endpoint | Description | Auth | Permission |
+|--------|----------|-------------|------|------------|
+| `GET` | `/api/v1/users` | List users (paginated, filtered) | Bearer | `admin.users:view` |
+| `POST` | `/api/v1/users` | Create user | Bearer | `admin.users:create` |
+| `GET` | `/api/v1/users/{id}` | Get user detail | Bearer | `admin.users:view` |
+| `PUT` | `/api/v1/users/{id}` | Update user profile | Bearer | `admin.users:edit` |
+| `PATCH` | `/api/v1/users/{id}/status` | Activate/deactivate user | Bearer | `admin.users:edit` |
+| `DELETE` | `/api/v1/users/{id}` | Deactivate user | Bearer | `admin.users:delete` |
+| `GET` | `/api/v1/users/{id}/roles` | Get user's roles | Bearer | `admin.users:view` |
+| `PUT` | `/api/v1/users/{id}/roles` | Set user roles | Bearer | `admin.users:edit` |
+| `GET` | `/api/v1/users/{id}/groups` | Get user's groups | Bearer | `admin.users:view` |
+| `PUT` | `/api/v1/users/{id}/groups` | Set user groups | Bearer | `admin.users:edit` |
+| `GET` | `/api/v1/users/{id}/permissions` | Get effective permissions | Bearer | `admin.users:view` |
+| `GET` | `/api/v1/users/me` | Current user profile | Bearer | — |
+| `PUT` | `/api/v1/users/me` | Update own profile | Bearer | — |
+| `POST` | `/api/v1/users/me/change-password` | Change own password | Bearer | — |
+| `GET` | `/api/v1/users/me/permissions` | Own permission matrix | Bearer | — |
+| `GET` | `/api/v1/users/me/sessions` | Active sessions | Bearer | — |
+| `DELETE` | `/api/v1/users/me/sessions/{id}` | Revoke a session | Bearer | — |
+
+---
+
+### 17.8 Group Management APIs
+
+| Method | Endpoint | Description | Auth | Permission |
+|--------|----------|-------------|------|------------|
+| `GET` | `/api/v1/groups` | List groups | Bearer | `admin.groups:view` |
+| `POST` | `/api/v1/groups` | Create group | Bearer | `admin.groups:create` |
+| `GET` | `/api/v1/groups/{id}` | Get group detail | Bearer | `admin.groups:view` |
+| `PUT` | `/api/v1/groups/{id}` | Update group | Bearer | `admin.groups:edit` |
+| `DELETE` | `/api/v1/groups/{id}` | Delete group | Bearer | `admin.groups:delete` |
+| `GET` | `/api/v1/groups/{id}/members` | List group members | Bearer | `admin.groups:view` |
+| `POST` | `/api/v1/groups/{id}/members` | Add members to group | Bearer | `admin.groups:edit` |
+| `DELETE` | `/api/v1/groups/{id}/members/{user_id}` | Remove member | Bearer | `admin.groups:edit` |
+| `GET` | `/api/v1/groups/{id}/roles` | Get group's roles | Bearer | `admin.groups:view` |
+| `PUT` | `/api/v1/groups/{id}/roles` | Set group roles | Bearer | `admin.groups:edit` |
+
+---
+
+### 17.9 Role & Permission APIs
+
+| Method | Endpoint | Description | Auth | Permission |
+|--------|----------|-------------|------|------------|
+| `GET` | `/api/v1/roles` | List roles | Bearer | `admin.roles:view` |
+| `POST` | `/api/v1/roles` | Create role | Bearer | `admin.roles:create` |
+| `GET` | `/api/v1/roles/{id}` | Get role detail | Bearer | `admin.roles:view` |
+| `PUT` | `/api/v1/roles/{id}` | Update role | Bearer | `admin.roles:edit` |
+| `DELETE` | `/api/v1/roles/{id}` | Delete role (non-system) | Bearer | `admin.roles:delete` |
+| `GET` | `/api/v1/roles/{id}/permissions` | Get role's permission matrix | Bearer | `admin.roles:view` |
+| `PUT` | `/api/v1/roles/{id}/permissions` | Bulk update permissions | Bearer | `admin.roles:edit` |
+| `GET` | `/api/v1/resources` | List all resources | Bearer | `admin.roles:view` |
+| `POST` | `/api/v1/resources` | Register new resource | Bearer | `super_admin` |
+| `GET` | `/api/v1/permissions/matrix` | Full permission matrix grid | Bearer | `admin.roles:view` |
+
+---
+
+### 17.10 Navigation & Menu Admin APIs
+
+| Method | Endpoint | Description | Auth | Permission |
+|--------|----------|-------------|------|------------|
+| `GET` | `/api/v1/navigation/menu` | Get user's filtered menu | Bearer | — (filtered by perms) |
+| `GET` | `/api/v1/navigation/menu/{id}/sub-menu` | Lazy-load sub-items | Bearer | — (filtered) |
+| `GET` | `/api/v1/admin/navigation/menu` | Admin: full menu tree (all items) | Bearer | `admin.menu:view` |
+| `POST` | `/api/v1/admin/navigation/menu` | Admin: create menu item | Bearer | `admin.menu:create` |
+| `PUT` | `/api/v1/admin/navigation/menu/{id}` | Admin: update menu item | Bearer | `admin.menu:edit` |
+| `DELETE` | `/api/v1/admin/navigation/menu/{id}` | Admin: delete menu item | Bearer | `admin.menu:delete` |
+| `POST` | `/api/v1/admin/navigation/menu/reorder` | Admin: reorder items | Bearer | `admin.menu:edit` |
+| `GET` | `/api/v1/admin/navigation/menu/{id}/assign-report` | Get report assignment | Bearer | `admin.menu:view` |
+| `PUT` | `/api/v1/admin/navigation/menu/{id}/assign-report` | Assign Power BI report | Bearer | `admin.menu:edit` |
+
+---
+
+### 17.11 AI Chat APIs
+
+| Method | Endpoint | Description | Auth | Permission |
+|--------|----------|-------------|------|------------|
+| `WS` | `/ws/v1/chat` | Bidirectional chat WebSocket | Bearer (query param) | `ai.chat:use` |
+| `GET` | `/api/v1/chat/sessions` | List chat sessions | Bearer | `ai.chat:use` |
+| `POST` | `/api/v1/chat/sessions` | Create session | Bearer | `ai.chat:use` |
+| `GET` | `/api/v1/chat/sessions/{id}` | Get session | Bearer | `ai.chat:use` |
+| `DELETE` | `/api/v1/chat/sessions/{id}` | Delete session | Bearer | `ai.chat:use` |
+| `GET` | `/api/v1/chat/sessions/{id}/messages` | Get history (paginated) | Bearer | `ai.chat:use` |
+| `GET` | `/api/v1/chat/tools` | List enabled agent tools | Bearer | `ai.chat:use` |
+| `PUT` | `/api/v1/admin/chat/tools/{name}` | Enable/disable tool | Bearer | `admin.ai:configure` |
+
+---
+
+### 17.12 Notification APIs
+
+| Method | Endpoint | Description | Auth |
+|--------|----------|-------------|------|
+| `WS` | `/ws/v1/notifications` | Notification push channel | Bearer (query param) |
+| `GET` | `/api/v1/notifications` | List notifications | Bearer |
+| `GET` | `/api/v1/notifications/unread-count` | Unread count for badge | Bearer |
+| `PATCH` | `/api/v1/notifications/{id}/read` | Mark as read | Bearer |
+| `POST` | `/api/v1/notifications/read-all` | Mark all as read | Bearer |
+| `DELETE` | `/api/v1/notifications/{id}` | Delete notification | Bearer |
+
+---
+
+### 17.13 Tenant Management APIs (Super Admin)
+
+| Method | Endpoint | Description | Auth | Role |
+|--------|----------|-------------|------|------|
+| `GET` | `/api/v1/tenants` | List all tenants | Bearer | `super_admin` |
+| `POST` | `/api/v1/tenants` | Create tenant | Bearer | `super_admin` |
+| `GET` | `/api/v1/tenants/{id}` | Tenant detail | Bearer | `super_admin` |
+| `PUT` | `/api/v1/tenants/{id}` | Update tenant | Bearer | `super_admin` |
+| `PATCH` | `/api/v1/tenants/{id}/status` | Suspend/activate | Bearer | `super_admin` |
+| `POST` | `/api/v1/tenants/{id}/domains` | Add custom domain | Bearer | `super_admin` |
+| `DELETE` | `/api/v1/tenants/{id}/domains/{domain_id}` | Remove domain | Bearer | `super_admin` |
+| `GET` | `/api/v1/tenants/{id}/config` | Get config values | Bearer | `super_admin` |
+| `PUT` | `/api/v1/tenants/{id}/config` | Update config values | Bearer | `super_admin` |
+| `GET` | `/api/v1/tenants/{id}/theme` | Get theme | Bearer | `tenant_admin` |
+| `PUT` | `/api/v1/tenants/{id}/theme` | Update theme/branding | Bearer | `tenant_admin` |
+
+---
+
+### 17.14 Entra Integration APIs
+
+| Method | Endpoint | Description | Auth | Permission |
+|--------|----------|-------------|------|------------|
+| `GET` | `/api/v1/auth/entra/authorize` | Start Entra OIDC flow | Public | — |
+| `GET` | `/api/v1/auth/entra/callback` | Entra OIDC callback | Public | — |
+| `GET` | `/api/v1/entra/config` | Get Entra OIDC config | Bearer | `admin.entra:view` |
+| `PUT` | `/api/v1/entra/config` | Update Entra config | Bearer | `admin.entra:edit` |
+| `GET` | `/api/v1/entra/groups` | List Entra group mappings | Bearer | `admin.entra:view` |
+| `POST` | `/api/v1/entra/groups/map` | Create group mapping | Bearer | `admin.entra:edit` |
+| `DELETE` | `/api/v1/entra/groups/map/{id}` | Remove group mapping | Bearer | `admin.entra:edit` |
+| `POST` | `/api/v1/entra/sync` | Trigger manual group sync | Bearer | `admin.entra:sync` |
+| `GET` | `/api/v1/entra/sync/status` | Get last sync status | Bearer | `admin.entra:view` |
+
+---
+
+### 17.15 Audit & System APIs
+
+| Method | Endpoint | Description | Auth | Permission |
+|--------|----------|-------------|------|------------|
+| `GET` | `/api/v1/audit/logs` | Query audit log | Bearer | `admin.audit:view` |
+| `GET` | `/api/v1/audit/login-history` | Login history | Bearer | `admin.audit:view` |
+| `GET` | `/api/v1/health` | Health check | Public | — |
+| `GET` | `/api/v1/health/ready` | Readiness check (DB + Redis) | Public | — |
+| `GET` | `/api/v1/versions` | API version discovery | Public | — |
+| `GET` | `/api/v1/auth/.well-known/jwks.json` | Public key set | Public | — |
+
+---
+
+## 19. Azure Deployment & Infrastructure
+
+### 18.1 Infrastructure Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    AZURE INFRASTRUCTURE TOPOLOGY                            │
+│                                                                            │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  Resource Group: rg-vesper-production                               │   │
+│  │                                                                     │   │
+│  │  ┌───────────────────────────────────────────────────────────────┐  │   │
+│  │  │  Azure Front Door (Premium)                                   │  │   │
+│  │  │  • Custom domains (*.vesper.com + tenant custom domains)     │  │   │
+│  │  │  • SSL certificate management (auto-provisioning)            │  │   │
+│  │  │  • WAF policy (OWASP 3.2 + custom rules)                   │  │   │
+│  │  │  • Global load balancing                                     │  │   │
+│  │  │  • Caching for static assets                                 │  │   │
+│  │  └───────────────┬─────────────────────┬─────────────────────────┘  │   │
+│  │                  │                     │                            │   │
+│  │       ┌──────────▼──────────┐  ┌───────▼───────────────────┐       │   │
+│  │       │ Static Web App      │  │ Container Apps Env        │       │   │
+│  │       │ (React Frontend)    │  │ (VNET-integrated)         │       │   │
+│  │       │                     │  │                           │       │   │
+│  │       │ • Auto CI/CD from   │  │ ┌─────────────────────┐  │       │   │
+│  │       │   GitHub Actions    │  │ │ API Gateway (YARP)  │  │       │   │
+│  │       │ • Global CDN        │  │ │ Scale: 2-20 replicas│  │       │   │
+│  │       │ • Staging slots     │  │ └──────────┬──────────┘  │       │   │
+│  │       └─────────────────────┘  │            │             │       │   │
+│  │                                │ ┌──────────▼──────────┐  │       │   │
+│  │                                │ │ Auth Service        │  │       │   │
+│  │                                │ │ Scale: 2-10 replicas│  │       │   │
+│  │                                │ └─────────────────────┘  │       │   │
+│  │                                │ ┌─────────────────────┐  │       │   │
+│  │                                │ │ Core API Service    │  │       │   │
+│  │                                │ │ Scale: 3-30 replicas│  │       │   │
+│  │                                │ └─────────────────────┘  │       │   │
+│  │                                │ ┌─────────────────────┐  │       │   │
+│  │                                │ │ User Mgmt Service   │  │       │   │
+│  │                                │ │ Scale: 2-15 replicas│  │       │   │
+│  │                                │ └─────────────────────┘  │       │   │
+│  │                                │ ┌─────────────────────┐  │       │   │
+│  │                                │ │ Background Workers  │  │       │   │
+│  │                                │ │ (Entra sync, audit) │  │       │   │
+│  │                                │ │ Scale: 1-5 replicas │  │       │   │
+│  │                                │ └─────────────────────┘  │       │   │
+│  │                                └───────────────────────────┘       │   │
+│  │                                                                    │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  Data Layer (Private Endpoints in VNET)                     │   │   │
+│  │  │                                                             │   │   │
+│  │  │  ┌─────────────────┐  ┌──────────────┐  ┌───────────────┐  │   │   │
+│  │  │  │ Azure SQL DB    │  │ Azure Redis  │  │ Azure Service │  │   │   │
+│  │  │  │ (Business Crit.)│  │ (Premium P1) │  │ Bus (Standard)│  │   │   │
+│  │  │  │                 │  │              │  │               │  │   │   │
+│  │  │  │ • Geo-replicas  │  │ • 6GB cache  │  │ • Topics +    │  │   │   │
+│  │  │  │ • Auto-failover │  │ • Clustering │  │   Subscriptns │  │   │   │
+│  │  │  │ • TDE enabled   │  │ • Persistence│  │ • Dead letter │  │   │   │
+│  │  │  │ • Auditing on   │  │              │  │               │  │   │   │
+│  │  │  └─────────────────┘  └──────────────┘  └───────────────┘  │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                    │   │
+│  │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│  │  │  Operations                                                 │   │   │
+│  │  │                                                             │   │   │
+│  │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │   │   │
+│  │  │  │ Key Vault    │  │ App Insights │  │ Log Analytics    │  │   │   │
+│  │  │  │ (Secrets)    │  │ (APM)        │  │ Workspace        │  │   │   │
+│  │  │  └──────────────┘  └──────────────┘  └──────────────────┘  │   │   │
+│  │  │                                                             │   │   │
+│  │  │  ┌──────────────┐  ┌──────────────┐                        │   │   │
+│  │  │  │ Container    │  │ Azure DNS    │                        │   │   │
+│  │  │  │ Registry     │  │ Zones        │                        │   │   │
+│  │  │  └──────────────┘  └──────────────┘                        │   │   │
+│  │  └─────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                    │   │
+│  └────────────────────────────────────────────────────────────────────┘   │
+│                                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 18.2 Auto-Scaling Configuration
+
+| Service | Min | Max | Scale Trigger | Cooldown |
+|---------|-----|-----|--------------|----------|
+| API Gateway | 2 | 20 | CPU > 70% OR concurrent requests > 100 | 60s |
+| Auth Service | 2 | 10 | CPU > 60% OR request latency P95 > 500ms | 60s |
+| Core API | 3 | 30 | CPU > 70% OR concurrent requests > 200 | 90s |
+| User Mgmt | 2 | 15 | CPU > 70% OR queue depth > 50 | 60s |
+| Workers | 1 | 5 | Queue depth > 100 messages | 120s |
+
+### 18.3 CI/CD Pipeline
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                        CI/CD PIPELINE                                  │
+│                                                                        │
+│  GitHub Repository                                                     │
+│       │                                                                │
+│       ├──► PR Created / Push to main                                  │
+│       │                                                                │
+│       ▼                                                                │
+│  GitHub Actions Workflow                                               │
+│       │                                                                │
+│       ├── Stage 1: Lint + Type Check                                  │
+│       │   ├── Python: ruff, mypy                                      │
+│       │   └── React: eslint, tsc --noEmit                             │
+│       │                                                                │
+│       ├── Stage 2: Unit Tests                                         │
+│       │   ├── Python: pytest (90%+ coverage)                          │
+│       │   └── React: vitest + testing-library                         │
+│       │                                                                │
+│       ├── Stage 3: Integration Tests                                  │
+│       │   └── Docker Compose with test DB + Redis                     │
+│       │                                                                │
+│       ├── Stage 4: Security Scan                                      │
+│       │   ├── Trivy (container scan)                                  │
+│       │   ├── Bandit (Python security)                                │
+│       │   └── npm audit                                               │
+│       │                                                                │
+│       ├── Stage 5: Build & Push                                       │
+│       │   ├── Docker build → Azure Container Registry                 │
+│       │   └── React build → artifact                                  │
+│       │                                                                │
+│       ├── Stage 6: Deploy to Staging                                  │
+│       │   ├── Alembic migrations (auto)                               │
+│       │   ├── Container Apps revision deploy                          │
+│       │   └── Static Web App staging slot                             │
+│       │                                                                │
+│       ├── Stage 7: Smoke Tests on Staging                             │
+│       │   └── Health checks + critical path E2E                      │
+│       │                                                                │
+│       └── Stage 8: Production Deploy (manual approval gate)           │
+│           ├── Blue/green deployment (Container Apps revisions)        │
+│           ├── Gradual traffic shift (10% → 50% → 100%)               │
+│           └── Auto-rollback on error rate spike                       │
+│                                                                        │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+### 18.4 Environment Strategy
+
+| Environment | Purpose | Azure SQL | Redis | Infra |
+|------------|---------|-----------|-------|-------|
+| **Local** | Developer machine | Docker SQL Server | Docker Redis | docker-compose |
+| **Dev** | Integration testing | Azure SQL (Basic) | Redis (Basic) | Container Apps (min scale) |
+| **Staging** | Pre-production validation | Azure SQL (Standard) | Redis (Standard) | Container Apps (prod-like) |
+| **Production** | Live traffic | Azure SQL (Business Critical) | Redis (Premium) | Container Apps (auto-scale) |
+
+---
+
+## 20. Appendix: Entity Relationship Diagrams
+
+### 19.1 Complete Permission Resolution - Visual Flow
+
+```
+                            ┌──────────┐
+                            │   USER   │
+                            │  (Alice) │
+                            └────┬─────┘
+                                 │
+                   ┌─────────────┼─────────────┐
+                   │                           │
+            ┌──────▼──────┐             ┌──────▼──────┐
+            │ Direct Role │             │   Groups    │
+            │ Assignment  │             │  Membership │
+            └──────┬──────┘             └──────┬──────┘
+                   │                           │
+            ┌──────▼──────┐             ┌──────▼──────┐
+            │   ROLE:     │             │   GROUP:    │
+            │  "Analyst"  │             │  "Finance"  │
+            └──────┬──────┘             └──────┬──────┘
+                   │                           │
+                   │                    ┌──────▼──────┐
+                   │                    │   ROLE:     │
+                   │                    │  "Viewer"   │
+                   │                    └──────┬──────┘
+                   │                           │
+                   └───────────┬───────────────┘
+                               │
+                        ┌──────▼──────┐
+                        │  EFFECTIVE  │
+                        │   ROLES:    │
+                        │  Analyst +  │
+                        │  Viewer     │
+                        └──────┬──────┘
+                               │
+              ┌────────────────┼────────────────┐
+              │                │                │
+       ┌──────▼──────┐ ┌──────▼──────┐ ┌──────▼──────┐
+       │  Analyst    │ │  Analyst    │ │   Viewer    │
+       │  Perms for  │ │  Perms for  │ │   Perms for │
+       │  Dashboard  │ │  Reports    │ │   Dashboard │
+       └──────┬──────┘ └──────┬──────┘ └──────┬──────┘
+              │                │                │
+              ▼                ▼                ▼
+  ┌─────────────────────────────────────────────────────┐
+  │              MERGED PERMISSION MATRIX               │
+  │                                                     │
+  │  dashboard           → view: ✓                     │
+  │  dashboard.revenue   → view: ✓                     │
+  │  dashboard.export    → view: ✗ (analyst:deny)      │
+  │  reports             → view: ✓                     │
+  │  reports.filters     → view: ✓                     │
+  │  reports.export      → view: ✓ (analyst:allow)     │
+  │  reports.delete      → view: ✗ (no grant = deny)   │
+  │  users               → view: ✗ (no grant)          │
+  └─────────────────────────────────────────────────────┘
+              │
+              ▼
+  Sent to React frontend via GET /api/v1/users/me/permissions
+  Frontend uses PermissionGate to show/hide UI elements
+```
+
+### 19.2 Entra ID Integration Flow
+
+```
+┌──────────┐     ┌──────────┐     ┌──────────────┐     ┌──────────────┐
+│  Browser │     │  React   │     │  FastAPI      │     │  Microsoft   │
+│          │     │  App     │     │  Backend      │     │  Entra ID    │
+└────┬─────┘     └────┬─────┘     └──────┬────────┘     └──────┬───────┘
+     │                │                   │                     │
+     │  Click "Login  │                   │                     │
+     │  with Microsoft│                   │                     │
+     │───────────────▶│                   │                     │
+     │                │                   │                     │
+     │                │ GET /auth/entra/  │                     │
+     │                │ authorize?tenant= │                     │
+     │                │──────────────────▶│                     │
+     │                │                   │                     │
+     │                │ Redirect URL with │                     │
+     │                │ state + PKCE      │                     │
+     │                │◀──────────────────│                     │
+     │                │                   │                     │
+     │ Redirect to    │                   │                     │
+     │ login.microsoft│                   │                     │
+     │ online.com     │                   │                     │
+     │◀───────────────│                   │                     │
+     │                                    │                     │
+     │ User authenticates with Microsoft  │                     │
+     │──────────────────────────────────────────────���────────▶│
+     │                                    │                     │
+     │ Auth code callback                 │                     │
+     │────────────────────────────────────▶│                     │
+     │                                    │                     │
+     │                                    │ Exchange code for   │
+     │                                    │ tokens              │
+     │                                    │────────────────────▶│
+     │                                    │                     │
+     │                                    │ id_token + access   │
+     │                                    │ token               │
+     │                                    │◀────────────────────│
+     │                                    │                     │
+     │                                    │ Validate id_token   │
+     │                                    │ Extract: oid, email │
+     │                                    │ name, groups        │
+     │                                    │                     │
+     │                                    │ Lookup user by oid  │
+     │                                    │ ┌────────────────┐  │
+     │                                    │ │ User exists?   │  │
+     │                                    │ │ YES → login    │  │
+     │                                    │ │ NO → provision │  │
+     │                                    │ │  • Create user │  │
+     │                                    │ │  • Map groups  │  │
+     │                                    │ │  • Set identity│  │
+     │                                    │ └────────────────┘  │
+     │                                    │                     │
+     │ Set cookies (refresh token)        │                     │
+     │ Return access token (JSON)         │                     │
+     │◀───────────────────────────────────│                     │
+     │                                    │                     │
+     │ Load app with permissions          │                     │
+     │───────────────▶│                   │                     │
+```
+
+### 19.3 Key Design Decisions Summary
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Multi-tenant DB model | Single DB, shared schema with RLS | Cost-effective, simpler operations, tenant isolation via RLS + app layer |
+| Permission model | Resource + Action matrix per Role | Industry-standard RBAC (similar to AWS IAM, Azure RBAC); granular yet manageable |
+| Permission granularity | Page → Section → Action (hierarchical) | Enables UI control at any level without rigid structure |
+| Token strategy | Short-lived JWT (15min) + refresh token | Balance between security and UX; stateless API validation |
+| Identity federation | OIDC with JIT provisioning + periodic sync | Seamless Entra integration; internal user always exists for permission mapping |
+| Caching | Redis with event-driven invalidation | Sub-millisecond permission checks; consistent invalidation via broker events |
+| Frontend permissions | Server-sent permission matrix + client-side gates | Zero-trust: UI never decides permissions; backend is the authority |
+| API versioning | URL path prefix | Simple, explicit, works with any HTTP client |
+| Message broker | Azure Service Bus (SaaS) | Managed service, dead-letter support, AMQP 1.0, no infra overhead |
+
+---
+
+---
+
+*This document is the authoritative architectural blueprint for the Vesper Analytics multi-tenant platform. All design decisions must be reviewed and approved before implementation begins. Implementation should proceed through the six phases defined in Section 1.4, starting with the database schema and authentication service, followed by the RBAC engine, backend middleware, infrastructure, platform features, and finally the frontend integration.*

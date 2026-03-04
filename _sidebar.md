@@ -2,3 +2,4 @@
 - [Chatbot](ChatBot.md)
 - [Internal Integration — Commercial NPV Tool](internal_integration.md)
 - [API Testing guide](api-testing-guide.md)
+- [Analytics Backend — Frontend Integration Guide](analytics-backend-frontend-integration.md)

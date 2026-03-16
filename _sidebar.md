@@ -1,5 +1,9 @@
 - [Home](README.md)
+- **Specifications**
+  - [v1.0 Technical Specification](v1.0_technical_specification.md)
+  - [v1.0 Business Specification](v1.0_business_specification.md)
+- **Guides**
+  - [Analytics Backend — Frontend Integration Guide](frontend_integration.md)
+  - [API Testing guide](api-testing-guide.md)
+  - [Internal Integration — Commercial NPV Tool](internal_integration.md)
 - [Chatbot](ChatBot.md)
-- [Internal Integration — Commercial NPV Tool](internal_integration.md)
-- [API Testing guide](api-testing-guide.md)
-- [Analytics Backend — Frontend Integration Guide](frontend_integration.md)

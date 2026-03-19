@@ -10,7 +10,7 @@
 
 ## How to Read This Document
 
-This document defines the strategy and implementation blueprint for integrating the **Commercial NPV Tool** (built by a separate team, hosted in GitHub) into the **Vesper Analytics Platform** (hosted in Azure DevOps). The result is:
+This document defines the strategy and implementation blueprint for integrating the **Commercial NPV Tool** (built by a separate team, hosted in GitHub) into the **Vesper DataHub Platform** (hosted in Azure DevOps). The result is:
 
 - Commercial NPV Tool users log in through Vesper's existing auth system
 - Access to the Commercial NPV page is controlled by Vesper RBAC (permission-gated menu item)
@@ -47,11 +47,11 @@ This document defines the strategy and implementation blueprint for integrating 
 
 The **Commercial NPV Tool** is a self-contained React + FastAPI application built by a separate commercial team and hosted in a GitHub repository. It currently has **no authentication or access control**.
 
-The **Vesper Analytics Platform** already has a production-grade auth and RBAC system (JWT RS256, role-based permissions, dynamic menu system, multi-tenant isolation).
+The **Vesper DataHub Platform** already has a production-grade auth and RBAC system (JWT RS256, role-based permissions, dynamic menu system, multi-tenant isolation).
 
 ### Goal
 
-Integrate the Commercial NPV Tool into Vesper Analytics so that:
+Integrate the Commercial NPV Tool into Vesper DataHub so that:
 
 | Requirement | How It Is Met |
 |------------|--------------|
@@ -98,7 +98,7 @@ Response flows back through Gateway → Frontend → User
 
 ## 2. Current State Analysis
 
-### 2.1 Vesper Analytics Platform (Azure DevOps)
+### 2.1 Vesper DataHub Platform (Azure DevOps)
 
 | Component | Status | Azure Service |
 |-----------|--------|--------------|
@@ -196,7 +196,7 @@ We deliberately avoid modifying the Commercial Tool's authentication logic. This
 ### 3.2 Request Flow — User Accesses the Commercial NPV Page
 
 ```
-1. User logs into Vesper Analytics (existing login flow)
+1. User logs into Vesper DataHub (existing login flow)
    → Vesper issues JWT + refresh token (HttpOnly cookie)
 
 2. GET /api/v1/navigation/menu
@@ -1152,4 +1152,4 @@ Examples:
 
 ---
 
-*This document governs the integration between the Vesper Analytics Platform and the Commercial NPV Tool. All integration changes must follow the Change Request process in §8.2. For questions, raise a Jira ticket against the Platform Engineering board.*
+*This document governs the integration between the Vesper DataHub Platform and the Commercial NPV Tool. All integration changes must follow the Change Request process in §8.2. For questions, raise a Jira ticket against the Platform Engineering board.*

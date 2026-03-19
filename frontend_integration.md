@@ -1,7 +1,7 @@
 # Analytics Backend — Frontend Integration Guide
 
 **Audience:** Frontend developers
-**Purpose:** Step-by-step guide to integrating with the Vesper Analytics API from a frontend application
+**Purpose:** Step-by-step guide to integrating with the Vesper DataHub API from a frontend application
 **Base URL:** `https://<your-api-host>/api/v1`
 **Interactive Docs:** `https://<your-api-host>/docs` (non-production only)
 

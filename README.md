@@ -1,4 +1,4 @@
-# Vesper Analytics Platform — Technical Design Document
+# Vesper DataHub Platform — Technical Design Document
 
 **Document Version:** 2.0
 **Date:** 2026-02-26
@@ -73,13 +73,13 @@ This document is organised in seven logical parts, progressing from architecture
 
 ## PART I — PLATFORM OVERVIEW
 
-*This part introduces the Vesper Analytics platform: its purpose, the complete high-level system architecture (including WebSocket, AI Agent, and Power BI channels), and the multi-tenancy strategy that underpins every design decision in this document. Read this part first regardless of your role.*
+*This part introduces the Vesper DataHub platform: its purpose, the complete high-level system architecture (including WebSocket, AI Agent, and Power BI channels), and the multi-tenancy strategy that underpins every design decision in this document. Read this part first regardless of your role.*
 
 ---
 
 ## 1. Executive Summary
 
-Vesper Analytics is a **multi-tenant SaaS platform** enabling organizations to launch branded analytics portals under their own custom domains. The platform provides a sophisticated, **industry-grade dynamic user management system** with granular role-based access control (RBAC) that governs visibility and actions down to the page, section, and individual UI control level.
+Vesper DataHub is a **multi-tenant SaaS platform** enabling organizations to launch branded analytics portals under their own custom domains. The platform provides a sophisticated, **industry-grade dynamic user management system** with granular role-based access control (RBAC) that governs visibility and actions down to the page, section, and individual UI control level.
 
 ### Key Design Principles
 
@@ -1329,7 +1329,7 @@ from app.api.v1.router import router as v1_router
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="Vesper Analytics API",
+        title="Vesper DataHub API",
         version="1.0.0",
         docs_url="/api/docs",
     )
@@ -3039,7 +3039,7 @@ llm_with_tools = llm.bind_tools(tools)
 
 async def intent_classifier(state: AgentState) -> AgentState:
     """Classify the user's intent to route to the right agent."""
-    system = """You are a business analytics assistant for Vesper Analytics.
+    system = """You are a business analytics assistant for Vesper DataHub.
     Classify the user's intent as one of:
     - sql_query: Needs live data from the database
     - powerbi_insight: Needs insights from Power BI reports
@@ -5638,7 +5638,7 @@ Content-Security-Policy:
 
 **Document End**
 
-*This document serves as the architectural blueprint for the Vesper Analytics multi-tenant platform. All design decisions should be reviewed and approved before implementation begins. Implementation should proceed in phases, starting with the core tenant and user management system, followed by the RBAC engine, Entra integration, WebSocket infrastructure, AI Chat Agent, Power BI integration, and finally the frontend permission system.*
+*This document serves as the architectural blueprint for the Vesper DataHub multi-tenant platform. All design decisions should be reviewed and approved before implementation begins. Implementation should proceed in phases, starting with the core tenant and user management system, followed by the RBAC engine, Entra integration, WebSocket infrastructure, AI Chat Agent, Power BI integration, and finally the frontend permission system.*
 
 ---
 
@@ -6416,4 +6416,4 @@ WS  /ws/v1/chat?token={access_token}&session_id={optional}
 
 ---
 
-*This document is the authoritative architectural blueprint for the Vesper Analytics multi-tenant platform. All design decisions must be reviewed and approved before implementation begins. Implementation should proceed through the six phases defined in Section 1.4, starting with the database schema and authentication service, followed by the RBAC engine, backend middleware, infrastructure, platform features, and finally the frontend integration.*
+*This document is the authoritative architectural blueprint for the Vesper DataHub multi-tenant platform. All design decisions must be reviewed and approved before implementation begins. Implementation should proceed through the six phases defined in Section 1.4, starting with the database schema and authentication service, followed by the RBAC engine, backend middleware, infrastructure, platform features, and finally the frontend integration.*

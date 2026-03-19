@@ -1,4 +1,4 @@
-# Vesper Analytics Platform - Technical Design Document
+# Vesper DataHub Platform - Technical Design Document
 
 **Document Version:** 1.0
 **Date:** 2026-02-20
@@ -28,7 +28,7 @@
 
 ## 1. Executive Summary
 
-Vesper Analytics is a **multi-tenant SaaS platform** enabling organizations to launch branded analytics portals under their own custom domains. The platform provides a sophisticated, **industry-grade dynamic user management system** with granular role-based access control (RBAC) that governs visibility and actions down to the page, section, and individual UI control level.
+Vesper DataHub is a **multi-tenant SaaS platform** enabling organizations to launch branded analytics portals under their own custom domains. The platform provides a sophisticated, **industry-grade dynamic user management system** with granular role-based access control (RBAC) that governs visibility and actions down to the page, section, and individual UI control level.
 
 ### Key Design Principles
 
@@ -1109,7 +1109,7 @@ from app.api.v1.router import router as v1_router
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="Vesper Analytics API",
+        title="Vesper DataHub API",
         version="1.0.0",
         docs_url="/api/docs",
     )
@@ -2307,4 +2307,4 @@ Query Parameters:
 
 **Document End**
 
-*This document serves as the architectural blueprint for the Vesper Analytics multi-tenant platform. All design decisions should be reviewed and approved before implementation begins. Implementation should proceed in phases, starting with the core tenant and user management system, followed by the RBAC engine, Entra integration, and finally the frontend permission system.*
+*This document serves as the architectural blueprint for the Vesper DataHub multi-tenant platform. All design decisions should be reviewed and approved before implementation begins. Implementation should proceed in phases, starting with the core tenant and user management system, followed by the RBAC engine, Entra integration, and finally the frontend permission system.*

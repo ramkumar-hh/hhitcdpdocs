@@ -1,4 +1,4 @@
-# Vesper Analytics — Multi-Agent NLP Chatbot
+# Vesper DataHub — Multi-Agent NLP Chatbot
 ## Technical Design Document
 
 > **Companion Document**: This TDD covers the chatbot agent layer in full detail.
@@ -570,7 +570,7 @@ Queries the `Stage.mc_dayahead` and `Stage.mc_vendor_files` views to answer ques
 
 ```python
 DAYAHEAD_AGENT_PROMPT = """
-You are the Day-Ahead Energy Curve specialist for Vesper Analytics.
+You are the Day-Ahead Energy Curve specialist for Vesper DataHub.
 You answer questions about energy price forecasts from vendor curve files.
 
 ## Data Available
@@ -1004,7 +1004,7 @@ This is the richest domain, backed by six SQL views. Data originates from **Asan
 
 ```python
 PER_AGENT_PROMPT = """
-You are the Project Execution (PER) specialist for Vesper Analytics.
+You are the Project Execution (PER) specialist for Vesper DataHub.
 You answer questions about renewable energy projects tracked in Asana.
 
 ## Data Available
@@ -1733,7 +1733,7 @@ The synthesizer receives all `agent_results` from the state and generates a sing
 # app/agents/response_synthesizer.py
 
 SYNTHESIZER_SYSTEM_PROMPT = """
-You are the response writer for Vesper Analytics chatbot.
+You are the response writer for Vesper DataHub chatbot.
 You receive structured data from one or more domain agents and must produce
 a clear, concise, business-friendly response.
 
@@ -2267,5 +2267,5 @@ Bot:   **5 milestone date changes** recorded in the last 7 days:
 
 ---
 
-*Document version: 1.0 | Created: 2026-02-27 | Owner: Vesper Analytics Engineering*
+*Document version: 1.0 | Created: 2026-02-27 | Owner: Vesper DataHub Engineering*
 *Companion: `docs/README.md` (platform architecture) | Stack: LangGraph + Claude claude-sonnet-4-6 + Azure SQL*

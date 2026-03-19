@@ -1,4 +1,4 @@
-# Vesper Analytics API — Testing Guide
+# Vesper DataHub API — Testing Guide
 
 **Audience:** Backend developers, frontend developers, QA engineers
 **Purpose:** Understand how to call and test every API endpoint individually, following the platform standards.
@@ -1008,7 +1008,7 @@ There are **two distinct layers** of Azure AD configuration:
 ### Step-by-Step: Platform App Registration (One Time — DevOps Only)
 
 1. Open [Azure Portal](https://portal.azure.com) → **Azure Active Directory** → **App registrations** → **New registration**
-2. Name: `Vesper Analytics Platform`
+2. Name: `Vesper DataHub Platform`
 3. Supported account types: **Accounts in any organizational directory (Multi-tenant)**
 4. Redirect URI: Web — `https://api.vesper-analytics.com/api/v1/auth/entra/callback`
    - For local dev add: `http://localhost:8000/api/v1/auth/entra/callback`
@@ -1030,7 +1030,7 @@ There are **two distinct layers** of Azure AD configuration:
 Each customer must perform this in **their own** Azure AD tenant:
 
 1. Azure Portal → App registrations → New registration
-2. Name: `Vesper Analytics` (or any name they choose)
+2. Name: `Vesper DataHub` (or any name they choose)
 3. Supported account types: **Single tenant** (accounts in this directory only)
 4. Redirect URI: Web — `https://api.vesper-analytics.com/api/v1/auth/entra/callback`
 5. Register → note **Application (client) ID** and **Directory (tenant) ID**
@@ -1799,4 +1799,4 @@ curl -s "$BASE_URL/api/v1/health" | python3 -m json.tool
 
 ---
 
-*Last updated: March 2026 | Vesper Analytics Platform*
+*Last updated: March 2026 | Vesper DataHub Platform*
